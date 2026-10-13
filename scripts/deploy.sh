@@ -30,4 +30,5 @@ gcloud secrets add-iam-policy-binding "$SECRET" "$P" \
 
 gcloud run deploy "$SERVICE" "$P" --source . --region "$REGION" --quiet \
   --allow-unauthenticated --max-instances 1 --memory 1Gi --timeout 300 \
-  --set-secrets "ANTHROPIC_API_KEY=${SECRET}:latest"
+  --set-secrets "ANTHROPIC_API_KEY=${SECRET}:latest" \
+  --set-env-vars DEMO_TRUSTED_PROXY_HOPS=1

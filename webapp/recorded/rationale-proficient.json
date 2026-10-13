@@ -17,5 +17,10 @@
     }
   ],
   "critique_invitation": "",
-  "takeaway": "Design rationale earns its place by stating the alternative you rejected, the reason it doesn't fit now, and the condition under which you'd change your mind."
+  "takeaway": "Design rationale earns its place by stating the alternative you rejected, the reason it doesn't fit now, and the condition under which you'd change your mind.",
+  "_plan": [
+    "gap",
+    "prediction",
+    "retrieval"
+  ]
 }

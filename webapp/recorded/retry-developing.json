@@ -23,5 +23,10 @@
     }
   ],
   "critique_invitation": "",
-  "takeaway": "Retry only errors that time can fix, space retries out with exponentially growing random delays, and always cap the number of attempts so failures still surface."
+  "takeaway": "Retry only errors that time can fix, space retries out with exponentially growing random delays, and always cap the number of attempts so failures still surface.",
+  "_plan": [
+    "gap",
+    "prediction",
+    "retrieval"
+  ]
 }

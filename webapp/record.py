@@ -24,6 +24,8 @@ def record(task_id: str, profile: str) -> Path:
             store.record_concept(name, context_id="record")
         context = store.context(task["concepts"], session_id="record")
         out = claude.run_task(task, context)
+        # The plan this response was made for, so replay can match it to a learner's current plan.
+        out["_plan"] = sorted({k for c in context["concepts"] for k in c["plan"]["interventions"]})
     _, spans = drafts.split(out["draft"])
     missing = [g["gap_id"] for g in out["gaps"] if g["gap_id"] not in spans]
     if missing:

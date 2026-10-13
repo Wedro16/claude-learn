@@ -122,7 +122,7 @@ textarea.draft { min-height: 360px; line-height: 1.45; tab-size: 4; white-space:
 .badge.as_expected { background: var(--good-soft); color: var(--good); }
 .badge.different { background: var(--warn-soft); color: var(--warn); }
 .badge.incorrect, .badge.handed_back { background: var(--bad-soft); color: var(--bad); }
-.badge.not_attempted { background: var(--code); color: var(--muted); }
+.badge.not_attempted, .badge.unverified { background: var(--code); color: var(--muted); }
 .legend span { font-size: 12px; padding: 2px 6px; border-radius: 4px; margin-right: 6px; }
 .legend .claude, .ownership .claude { background: var(--claude); }
 .legend .claude_modified, .ownership .claude_modified { background: var(--claude-mod); }

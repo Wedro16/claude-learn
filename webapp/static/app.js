@@ -1,4 +1,4 @@
-const state = { profile: "developing", task: "retry", run: null, catalog: null };
+const state = { profile: "developing", task: "retry", run: null, catalog: null, runSeq: 0 };
 const $ = (sel, root = document) => root.querySelector(sel);
 const slot = (name) => $(`[data-slot="${name}"]`, $("#result"));
 const LEVELS = ["exposed", "explain", "predict", "modify", "critique"];
@@ -36,7 +36,7 @@ function renderPickers() {
   const { profiles, tasks } = state.catalog;
   $("#profiles").replaceChildren(...profiles.map((p) => el("button", {
     class: "pick", "aria-pressed": String(p.id === state.profile),
-    onclick: () => { state.profile = p.id; renderPickers(); loadModel(); },
+    onclick: () => { if (p.id === state.profile) return; state.profile = p.id; clearRun(); renderPickers(); loadModel(); },
   }, el("strong", {}, p.name), el("span", {}, p.summary))));
   $("#tasks").replaceChildren(...tasks.map((t) => el("button", {
     class: "pick", "aria-pressed": String(t.id === state.task),
@@ -82,7 +82,25 @@ function renderModel(model, events = [], changed = new Set()) {
 }
 
 async function loadModel() {
-  renderModel(await api(`/api/model/${state.profile}`));
+  const profile = state.profile;
+  const model = await api(`/api/model/${profile}`);
+  if (profile === state.profile) renderModel(model);  // a later selection wins
+}
+
+// Runs belong to one learner's sandbox; switching or resetting the learner ends the run.
+function clearRun() {
+  state.run = null;
+  state.runSeq += 1;
+  $("#result").classList.add("hidden");
+  $("#result").replaceChildren();
+  $("#events").replaceChildren();
+  $("#empty").classList.remove("hidden");
+  setLoading(false);
+}
+
+// True when a response still belongs to the run on screen.
+function current(runId) {
+  return state.run && state.run.run_id === runId;
 }
 
 function applyUpdate(data) {
@@ -105,25 +123,30 @@ function withTimer(text) {
   const timer = setInterval(() => {
     $("#loading-text").textContent = `${text} (${Math.round((Date.now() - start) / 1000)} s)`;
   }, 1000);
-  return () => { clearInterval(timer); setLoading(false); };
+  // done(false) stops the timer without touching a newer run's loading state.
+  return (finish = true) => { clearInterval(timer); if (finish) setLoading(false); };
 }
 
 async function start() {
   $("#empty").classList.add("hidden");
   $("#result").classList.add("hidden");
+  const seq = ++state.runSeq;
+  const profile = state.profile;
   const done = withTimer(live()
     ? "Claude is doing the task and deciding what to leave for the learner…"
     : "Loading the recorded response…");
   try {
-    const run = await api("/api/run", { task_id: state.task, profile: state.profile, live: live() });
+    const run = await api("/api/run", { task_id: state.task, profile, live: live() });
+    if (seq !== state.runSeq || profile !== state.profile) return;  // superseded while in flight
     state.run = run;
     renderRun(run);
     applyUpdate(run);
   } catch (err) {
+    if (seq !== state.runSeq) return;
     $("#empty").classList.remove("hidden");
     $("#empty").replaceChildren(el("p", {}, `Something went wrong: ${err.message}`));
   } finally {
-    done();
+    done(seq === state.runSeq);
   }
 }
 
@@ -171,7 +194,7 @@ function renderRun(run) {
 
   slot("source").textContent = run.source === "live"
     ? "Live response from Claude Opus 5.5."
-    : `Recorded live response (instant replay${run.note && run.note !== "recorded mode selected" ? `: ${run.note}` : ""}).`;
+    : `Recorded live response (instant replay).${run.note && run.note !== "recorded mode selected" ? ` ${run.note}` : ""}`;
   slot("plan").replaceChildren(el("span", { class: "muted" }, `Plan for ${name}:`), ...run.plan.map((c) =>
     el("span", { class: "chip" }, el("b", {}, c.name), ` · level ${c.level} · `,
       c.interventions.length ? c.interventions.join(", ").replaceAll("_", " ") : "no interventions")));
@@ -215,9 +238,11 @@ function renderRun(run) {
 async function answer() {
   const text = slot("prediction-answer").value.trim();
   if (!text) return;
+  const runId = state.run.run_id;
   const done = withTimer(live() ? "Claude is checking your answer…" : "Recording your answer…");
   try {
-    const data = await api(`/api/runs/${state.run.run_id}/predict`, { profile: state.profile, answer: text, live: live() });
+    const data = await api(`/api/runs/${runId}/predict`, { profile: state.profile, answer: text, live: live() });
+    if (!current(runId)) return;
     const fb = slot("prediction-feedback");
     fb.classList.remove("hidden");
     fb.replaceChildren(el("span", { class: `badge ${data.outcome === "correct" ? "as_expected" : data.outcome === "partial" ? "different" : "incorrect"}` }, data.outcome), " ", mdInline(data.feedback));
@@ -231,13 +256,17 @@ async function answer() {
 }
 
 async function skip() {
-  const data = await api(`/api/runs/${state.run.run_id}/skip`, { profile: state.profile });
+  const runId = state.run.run_id;
+  const data = await api(`/api/runs/${runId}/skip`, { profile: state.profile });
+  if (!current(runId)) return;
   slot("prediction-card").classList.add("hidden");
   applyUpdate(data);
 }
 
 async function reveal(gapId) {
-  const data = await api(`/api/runs/${state.run.run_id}/reveal`, { profile: state.profile, gap_id: gapId });
+  const runId = state.run.run_id;
+  const data = await api(`/api/runs/${runId}/reveal`, { profile: state.profile, gap_id: gapId });
+  if (!current(runId)) return;
   const box = $(`[data-gap="${gapId}"]`, $("#result"));
   box.querySelector("button")?.remove();
   box.append(el("pre", { class: "answer" }, data.answer));
@@ -245,18 +274,20 @@ async function reveal(gapId) {
 }
 
 async function submit() {
+  const runId = state.run.run_id;
   const done = withTimer(live() ? "Claude is comparing your version with the one it would have written…" : "Reviewing…");
   try {
-    const data = await api(`/api/runs/${state.run.run_id}/submit`, {
+    const data = await api(`/api/runs/${runId}/submit`, {
       profile: state.profile, text: slot("draft").value, live: live(),
     });
+    if (!current(runId)) return;
     slot("review-card").classList.remove("hidden");
     const byId = Object.fromEntries(state.run.gaps.map((g) => [g.gap_id, g]));
     const verdicts = data.gaps.filter((v) => byId[v.gap_id]).map((v) => el("div", { class: "verdict" },
       el("span", { class: `badge ${v.verdict}` }, v.verdict.replaceAll("_", " ")),
       el("span", {}, el("b", {}, `${v.gap_id}: `), mdInline(v.feedback))));
     if (data.other_changes) verdicts.push(el("p", {}, el("b", {}, "Other changes: "), mdInline(data.other_changes)));
-    if (data.source !== "live") verdicts.push(el("p", { class: "muted" }, "Offline review (heuristic)."));
+    if (data.source !== "live") verdicts.push(el("p", { class: "muted" }, "Offline review: only exact matches earn credit; anything else waits for a live review."));
     slot("review").replaceChildren(...(verdicts.length ? verdicts : [el("p", { class: "muted" }, "No gaps to review.")]));
     slot("share").textContent = `${Math.round(data.ownership.learner_share * 100)}% of lines are yours or edited by you`;
     slot("ownership").replaceChildren(...data.ownership.lines.map((l) => el("span", { class: l.cls }, l.text || " ")));
@@ -271,7 +302,10 @@ async function submit() {
 
 async function reset() {
   if (!confirm(`Restore ${profileName(state.profile)}'s seeded history?`)) return;
-  renderModel(await api("/api/reset", { profile: state.profile }));
+  const profile = state.profile;
+  clearRun();
+  const model = await api("/api/reset", { profile });
+  if (profile === state.profile) renderModel(model);
 }
 
 // -- boot --------------------------------------------------------------------

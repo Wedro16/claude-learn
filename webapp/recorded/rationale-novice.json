@@ -10,5 +10,10 @@
   "draft": "## Design decisions\n\n### Cache in front of the forecast API\nThe forecast API was receiving ~40 requests/min, almost all for the same 12 cities. Caching collapses these into roughly one upstream call per city per TTL window, about 1.2 requests/min.\n\n### TTL: 10 minutes\nUpstream forecasts change only hourly, so any TTL under an hour is safe. We chose 10 minutes so users see a new forecast within 10 minutes of an upstream update. This still removes most upstream traffic.\n\n### In-process LRU (max 256 entries), not Redis\nWe run a single instance, so a shared cache gives us no benefit yet. Redis would also be another service to deploy, monitor, and secure. 256 entries comfortably covers the 12 hot cities plus long-tail lookups.\n\n*Trade-off:* the cache is empty after every restart.\n\n### Serve stale data on upstream errors\nIf the upstream call fails and we have a cached entry, we return it marked as stale instead of failing. A slightly old forecast is more useful than an error, and the stale flag lets clients decide how to present it. If no entry exists, the request fails as before.\n\n### When to revisit\nSwitch to a shared cache such as Redis if we scale beyond one instance. Past that point, per-instance caches lower hit rates, and different instances could serve different forecasts for the same city.",
   "gaps": [],
   "critique_invitation": "",
-  "takeaway": "For every design decision, write down the choice, the constraint that justifies it, what you gave up, and what would make you reconsider."
+  "takeaway": "For every design decision, write down the choice, the constraint that justifies it, what you gave up, and what would make you reconsider.",
+  "_plan": [
+    "orientation",
+    "takeaway",
+    "worked_example"
+  ]
 }

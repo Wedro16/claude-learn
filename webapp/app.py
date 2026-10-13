@@ -7,6 +7,7 @@ the Claude Code pilot (learner/) runs underneath.
 Run locally:  uvicorn webapp.app:app --reload
 """
 
+import hashlib
 import json
 import os
 import re
@@ -17,7 +18,7 @@ from collections import defaultdict, deque
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -28,8 +29,14 @@ from webapp import claude, content, drafts
 
 DATA_DIR = Path(os.environ.get("DEMO_DATA_DIR", "/tmp/claude-learn-demo"))
 STATIC = Path(__file__).parent / "static"
+# Content hash of the static assets: each deploy gets new asset URLs, so browsers never run stale code.
+STATIC_VERSION = hashlib.sha256(
+    b"".join((STATIC / name).read_bytes() for name in ("app.js", "style.css"))
+).hexdigest()[:12]
 PER_VISITOR_PER_HOUR = int(os.environ.get("DEMO_CALLS_PER_HOUR", "30"))
 GLOBAL_PER_DAY = int(os.environ.get("DEMO_CALLS_PER_DAY", "800"))
+# Proxies that append to X-Forwarded-For in front of the app (Cloud Run's front end appends 1).
+TRUSTED_PROXY_HOPS = int(os.environ.get("DEMO_TRUSTED_PROXY_HOPS", "0"))
 COOKIE = "claude_learn_visitor"
 
 RUNS_SCHEMA = """
@@ -37,6 +44,10 @@ CREATE TABLE IF NOT EXISTS demo_runs (
     id      TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
     at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS demo_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -80,12 +91,24 @@ class Limiter:
 limiter = Limiter()
 
 
+def client_address(request: Request) -> str:
+    """The caller's address as recorded by trusted proxies.
+
+    Callers can put anything at the start of X-Forwarded-For; each trusted proxy
+    appends the address it saw, so count back from the end.
+    """
+    if TRUSTED_PROXY_HOPS:
+        hops = [h.strip() for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+        if len(hops) >= TRUSTED_PROXY_HOPS:
+            return hops[-TRUSTED_PROXY_HOPS]
+    return request.client.host if request.client else "?"
+
+
 def live(request: Request, want_live: bool, fn, *args):
     """Call Claude if allowed; raise Unavailable so callers use the offline path otherwise."""
     if not want_live:
         raise claude.Unavailable("recorded mode selected")
-    ip = (request.headers.get("x-forwarded-for") or request.client.host or "?").split(",")[0].strip()
-    if not limiter.allow(ip):
+    if not limiter.allow(client_address(request)):
         raise claude.Unavailable("live-call limit reached for now")
     return fn(*args)
 
@@ -101,17 +124,30 @@ def visitor(request: Request, response: Response) -> str:
     return vid
 
 
-def learner(vid: str, profile: str) -> LearnerStore:
+_seed_locks: dict[Path, threading.Lock] = defaultdict(threading.Lock)
+_seed_locks_guard = threading.Lock()
+
+
+def learner_path(vid: str, profile: str) -> Path:
+    """The sandbox file for a visitor's learner. Only known profiles map to a path."""
     if profile not in content.PROFILES:
         raise HTTPException(404, f"Unknown profile {profile!r}")
-    folder = DATA_DIR / vid
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"{profile}.db"
-    fresh = not path.exists()
-    store = LearnerStore(connect(path))
-    store.conn.executescript(RUNS_SCHEMA)
-    if fresh:
-        content.seed(store, profile)
+    return DATA_DIR / vid / f"{profile}.db"
+
+
+def learner(vid: str, profile: str) -> LearnerStore:
+    path = learner_path(vid, profile)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _seed_locks_guard:
+        lock = _seed_locks[path]
+    # Seeding happens once, completely, before anyone reads the model.
+    with lock:
+        store = LearnerStore(connect(path))
+        store.conn.executescript(RUNS_SCHEMA)
+        if not store.conn.execute("SELECT 1 FROM demo_meta WHERE key = 'seeded'").fetchone():
+            content.seed(store, profile)
+            with store.conn:
+                store.conn.execute("INSERT OR REPLACE INTO demo_meta (key, value) VALUES ('seeded', '1')")
     return store
 
 
@@ -182,7 +218,10 @@ class ProfileRequest(BaseModel):
 
 @app.get("/", include_in_schema=False)
 def index():
-    return FileResponse(STATIC / "index.html")
+    html = (STATIC / "index.html").read_text()
+    for asset in ("app.js", "style.css"):
+        html = html.replace(f"/static/{asset}", f"/static/{asset}?v={STATIC_VERSION}")
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/api/catalog")
@@ -205,7 +244,11 @@ def model(profile: str, request: Request, response: Response):
 def reset(body: ProfileRequest, request: Request, response: Response):
     """Restore a learner to their seeded history."""
     vid = visitor(request, response)
-    (DATA_DIR / vid / f"{body.profile}.db").unlink(missing_ok=True)
+    path = learner_path(vid, body.profile)
+    with _seed_locks_guard:
+        lock = _seed_locks[path]
+    with lock:
+        path.unlink(missing_ok=True)
     return snapshot(learner(vid, body.profile))
 
 
@@ -226,7 +269,12 @@ def run(body: RunRequest, request: Request, response: Response):
     try:
         out, source, note = live(request, body.live, claude.run_task, task, context), "live", ""
     except claude.Unavailable as exc:
-        out, source, note = claude.recorded_run(task["id"], body.profile), "recorded", str(exc)
+        out, matched = claude.recorded_run(task["id"], body.profile, allowed)
+        source = "recorded"
+        note = str(exc) if matched else (
+            f"{content.PROFILES[body.profile]['name']}'s model has changed since this replay was recorded, "
+            "so it may not match the plan above. Turn on Live Claude for a response adapted to the current model."
+        )
 
     # The plan, not the model, decides which interventions appear.
     if "orientation" not in allowed:
@@ -335,7 +383,9 @@ def submit(run_id: str, body: SubmitRequest, request: Request, response: Respons
         if e := event(result, f"gap {gap['gap_id']}: {v.replace('_', ' ')}"):
             events.append(e)
 
-    owned = drafts.ownership(run_state["scaffold"], body.text)
+    # Answers Claude revealed are Claude's lines too, wherever the learner pastes them.
+    reference = "\n".join([run_state["scaffold"], *run_state.get("revealed", {}).values()])
+    owned = drafts.ownership(reference, body.text)
     primary = task["concepts"][0]
     store.record_evidence(primary, "draft_ownership", None, detail=str(owned["learner_share"]), ref=run_id)
     if reviewed.get("caught_issue"):
@@ -353,12 +403,16 @@ def reveal(run_id: str, body: RevealRequest, request: Request, response: Respons
     if gap is None:
         raise HTTPException(404, "Unknown gap")
     result = store.update_withheld(gap["item_id"], "handed_back")
+    run_state.setdefault("revealed", {})[gap["gap_id"]] = run_state["spans"][gap["gap_id"]]
+    save_run(store, run_id, run_state)
     events = [e for e in [event(result, f"gap {gap['gap_id']}: handed back")] if e]
     return {"gap_id": gap["gap_id"], "answer": run_state["spans"][gap["gap_id"]], "events": events,
             "model": snapshot(store)}
 
 
 @app.get("/health", include_in_schema=False)
-def health():
-    return {"ok": True}
+def health(request: Request):
+    # The entry count (never the addresses) confirms how many proxies append to X-Forwarded-For.
+    forwarded = [h for h in request.headers.get("x-forwarded-for", "").split(",") if h.strip()]
+    return {"ok": True, "forwarded_entries": len(forwarded), "trusted_proxy_hops": TRUSTED_PROXY_HOPS}
 

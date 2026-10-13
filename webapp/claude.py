@@ -208,11 +208,22 @@ def grade(task: dict, question: str, answer: str, baseline: str) -> dict:
 # -- offline paths -----------------------------------------------------------
 
 
-def recorded_run(task_id: str, profile: str) -> dict:
-    path = RECORDED / f"{task_id}-{profile}.json"
-    if not path.exists():
-        raise Unavailable("no recorded response for this task and learner")
-    return json.loads(path.read_text())
+def recorded_run(task_id: str, profile: str, allowed: set[str]) -> tuple[dict, bool]:
+    """A recorded live response for this task, preferring one made for the same plan.
+
+    Returns (response, matched). Each recording stores the interventions its plan
+    allowed; a learner whose model has moved on may match another profile's
+    recording. Without a match, the profile's own recording is returned unmatched.
+    """
+    candidates = sorted(RECORDED.glob(f"{task_id}-*.json"), key=lambda p: p.stem != f"{task_id}-{profile}")
+    if not candidates:
+        raise Unavailable("no recorded response for this task")
+    for path in candidates:
+        out = json.loads(path.read_text())
+        if set(out.get("_plan", [])) == allowed:
+            return out, True
+    own = RECORDED / f"{task_id}-{profile}.json"
+    return json.loads((own if own.exists() else candidates[0]).read_text()), False
 
 
 def _norm(text: str) -> str:
@@ -226,13 +237,16 @@ def heuristic_review(baseline_spans: dict[str, str], learner_text: str, gaps: li
     open_ids = unfilled(learner_text)
     out = []
     for g in gaps:
+        expected = _norm(baseline_spans.get(g["gap_id"], ""))
         if g["gap_id"] in open_ids:
             verdict, feedback = "not_attempted", "The TODO(learner) marker is still there."
-        elif _norm(baseline_spans.get(g["gap_id"], "")) in _norm(learner_text):
+        elif expected and expected in _norm(learner_text):
             verdict, feedback = "as_expected", "Matches the baseline."
         else:
-            verdict = "different"
-            feedback = "Differs from the baseline. (Offline review: live Claude would judge whether it works.)"
+            # Without Claude there's no way to tell a working alternative from a wrong one,
+            # so it earns no credit and the gap stays open for a live review.
+            verdict = "unverified"
+            feedback = "Differs from the baseline, so it can't be checked offline. Turn on Live Claude to have it reviewed."
         out.append({"gap_id": g["gap_id"], "verdict": verdict, "feedback": feedback})
     return {"gaps": out, "other_changes": "", "caught_issue": False}
 

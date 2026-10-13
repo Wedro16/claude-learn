@@ -55,24 +55,30 @@ def _todo(gap: dict, indent: str, kind: str) -> str:
 
 
 def scaffold(draft: str, gaps: list[dict], kind: str) -> str:
-    """The draft with each marked span replaced by its TODO line."""
+    """The draft with each registered gap's span replaced by its TODO line.
+
+    Only gaps the server registered (and can reveal and review) are withheld.
+    Spans with no matching gap, and a span whose marker never closes, stay as
+    complete text, matching what split() keeps in the baseline.
+    """
     by_id = {g["gap_id"]: g for g in gaps}
-    out, inside = [], None
+    out, inside, buffer = [], None, []
     for line in unfence(draft).splitlines():
         if (m := _OPEN.match(line)) and inside is None:
-            inside = m.group(1)
-            pending_indent = None
-            continue
-        if _CLOSE.match(line) and inside is not None:
-            gap = by_id.get(inside, {"gap_id": inside, "description": "Write this part.", "hint": ""})
-            out.append(_todo(gap, pending_indent or "", kind))
+            inside, buffer = m.group(1), []
+        elif _CLOSE.match(line) and inside is not None:
+            if inside in by_id:
+                indent = next((l[: len(l) - len(l.lstrip())] for l in buffer if l.strip()), "")
+                out.append(_todo(by_id[inside], indent, kind))
+            else:
+                out.extend(buffer)
             inside = None
-            continue
-        if inside is not None:
-            if pending_indent is None and line.strip():
-                pending_indent = line[: len(line) - len(line.lstrip())]
-            continue
-        out.append(line)
+        elif inside is not None:
+            buffer.append(line)
+        elif not _OPEN.match(line) and not _CLOSE.match(line):
+            out.append(line)
+    if inside is not None:  # never closed: keep the text
+        out.extend(buffer)
     return "\n".join(out)
 
 

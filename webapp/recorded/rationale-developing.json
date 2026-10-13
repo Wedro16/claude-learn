@@ -17,5 +17,10 @@
     }
   ],
   "critique_invitation": "",
-  "takeaway": "Good design rationale pairs each choice with the constraint that justifies it and the condition under which you'd change it, so reviewers can check the reasoning rather than just the result."
+  "takeaway": "Good design rationale pairs each choice with the constraint that justifies it and the condition under which you'd change it, so reviewers can check the reasoning rather than just the result.",
+  "_plan": [
+    "gap",
+    "prediction",
+    "retrieval"
+  ]
 }

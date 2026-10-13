@@ -127,7 +127,7 @@ def test_reveal_hands_back_and_returns_the_answer(client):
 
 
 def test_recorded_mode_needs_no_live_call(client, monkeypatch):
-    monkeypatch.setattr(claude, "recorded_run", lambda task_id, profile: RUN)
+    monkeypatch.setattr(claude, "recorded_run", lambda task_id, profile, allowed: (RUN, True))
     monkeypatch.setattr(claude, "run_task", lambda *a: pytest.fail("live call in recorded mode"))
     run = client.post("/api/run", json={"task_id": "retry", "profile": "developing", "live": False}).json()
     assert run["source"] == "recorded"
@@ -154,3 +154,93 @@ def test_a_fenced_draft_is_unwrapped():
     fenced = "```python\n" + DRAFT + "```"
     assert drafts.split(fenced) == drafts.split(DRAFT)
     assert not drafts.scaffold(fenced, RUN["gaps"], "code").startswith("```")
+
+
+def test_reset_rejects_paths_outside_the_sandbox(client, tmp_path):
+    victim = tmp_path / "victim.db"
+    victim.write_text("keep me")
+    for bad in (str(tmp_path / "victim"), "../../victim", "novice/../../x"):
+        assert client.post("/api/reset", json={"profile": bad}).status_code == 404
+    assert victim.read_text() == "keep me"
+
+
+def test_rate_limit_key_ignores_caller_supplied_forwarding(monkeypatch):
+    from starlette.requests import Request
+
+    def request(xff):
+        headers = [(b"x-forwarded-for", xff.encode())] if xff else []
+        return Request({"type": "http", "headers": headers, "client": ("10.0.0.9", 1)})
+
+    monkeypatch.setattr(webapp_app, "TRUSTED_PROXY_HOPS", 1)
+    assert webapp_app.client_address(request("6.6.6.6, 203.0.113.7")) == "203.0.113.7"
+    assert webapp_app.client_address(request("203.0.113.7")) == "203.0.113.7"
+    monkeypatch.setattr(webapp_app, "TRUSTED_PROXY_HOPS", 0)
+    assert webapp_app.client_address(request("6.6.6.6")) == "10.0.0.9"
+
+
+def test_offline_review_never_credits_an_unverified_difference(client, monkeypatch):
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    emptied = "\n".join(l for l in run["scaffold"].splitlines() if "TODO(learner)" not in l)
+    data = client.post(f"/api/runs/{run['run_id']}/submit",
+                       json={"profile": "developing", "text": emptied, "live": False}).json()
+    assert data["gaps"][0]["verdict"] == "unverified" and data["events"] == []
+    model = client.get("/api/model/developing").json()
+    assert {c["name"]: c["level"] for c in model["concepts"]}["retry with exponential backoff"] == 2
+    # The gap stays open, so a later live review can still credit it.
+    review = lambda *a: {"gaps": [{"gap_id": "gap-1", "verdict": "as_expected", "feedback": "ok"}],
+                         "other_changes": "", "caught_issue": False}
+    monkeypatch.setattr(claude, "review", review)
+    data = client.post(f"/api/runs/{run['run_id']}/submit", json={"profile": "developing", "text": emptied}).json()
+    assert data["events"][0]["to"] == 3
+
+
+def test_revealed_answers_count_as_claude_written(client):
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    answer = client.post(f"/api/runs/{run['run_id']}/reveal",
+                         json={"profile": "developing", "gap_id": "gap-1"}).json()["answer"]
+    pasted = "\n".join(answer if "TODO(learner)" in l else l for l in run["scaffold"].splitlines())
+    data = client.post(f"/api/runs/{run['run_id']}/submit",
+                       json={"profile": "developing", "text": pasted, "live": False}).json()
+    assert data["ownership"]["totals"]["human"] == 0
+
+
+def test_concurrent_first_requests_all_see_a_seeded_learner(client):
+    from concurrent.futures import ThreadPoolExecutor
+
+    vid = "a" * 32
+    def concepts(_):
+        return len(webapp_app.snapshot(webapp_app.learner(vid, "developing"))["concepts"])
+    with ThreadPoolExecutor(8) as pool:
+        counts = list(pool.map(concepts, range(8)))
+    assert len(set(counts)) == 1 and counts[0] >= 5
+
+
+def test_replay_matches_the_current_plan_or_says_it_does_not(tmp_path, monkeypatch):
+    monkeypatch.setattr(claude, "RECORDED", tmp_path)
+    (tmp_path / "retry-developing.json").write_text('{"_plan": ["gap", "prediction", "retrieval"], "who": "dev"}')
+    (tmp_path / "retry-proficient.json").write_text('{"_plan": ["critique", "what_if"], "who": "pro"}')
+    out, matched = claude.recorded_run("retry", "developing", {"critique", "what_if"})
+    assert matched and out["who"] == "pro"
+    out, matched = claude.recorded_run("retry", "developing", {"critique", "gap"})
+    assert not matched and out["who"] == "dev"
+
+
+def test_recorded_run_notes_a_plan_mismatch(client, monkeypatch):
+    monkeypatch.setattr(claude, "recorded_run", lambda task_id, profile, allowed: (RUN, False))
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing", "live": False}).json()
+    assert "model has changed" in run["note"]
+
+
+def test_unregistered_and_unclosed_spans_stay_in_the_scaffold():
+    draft = "a = 1\n[[GAP gap-1]]\nb = 2\n[[/GAP]]\n[[GAP gap-9]]\nc = 3\n[[/GAP]]\n[[GAP gap-2]]\nd = 4\ne = 5"
+    gaps = [{"gap_id": "gap-1", "description": "d", "hint": "h"}, {"gap_id": "gap-2", "description": "d", "hint": "h"}]
+    out = drafts.scaffold(draft, gaps, "code")
+    assert out.splitlines() == ["a = 1", "# TODO(learner) gap-1: d Hint: h", "c = 3", "d = 4", "e = 5"]
+    baseline, _ = drafts.split(draft)
+    assert baseline.splitlines() == ["a = 1", "b = 2", "c = 3", "d = 4", "e = 5"]
+
+
+def test_index_versions_its_assets(client):
+    res = client.get("/")
+    assert res.headers["cache-control"] == "no-cache"
+    assert f"/static/app.js?v={webapp_app.STATIC_VERSION}" in res.text
