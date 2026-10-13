@@ -5,7 +5,9 @@ data, documents or domain expertise of their own. Learner histories are
 synthetic and labeled as such in the UI.
 """
 
+import re
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from learner.store import LearnerStore
 
@@ -77,6 +79,12 @@ def fetch_forecast(api, city):
 }
 
 PROFILES = {
+    "you": {
+        "id": "you",
+        "name": "You",
+        "summary": "Starts empty and builds from the tasks you bring. Use it for your own work.",
+        "own": True,
+    },
     "novice": {
         "id": "novice",
         "name": "Sam",
@@ -93,6 +101,30 @@ PROFILES = {
         "summary": "Has written retry logic unassisted and caught a bug in Claude's version last month.",
     },
 }
+
+
+OWN_MATERIAL_LIMIT = 20000  # characters of pasted or uploaded material
+
+
+def own_task(kind: str, request: str, material: str, filename: str, scoped: dict, concepts: list[str]) -> dict:
+    """A task card for work the visitor brings, filled in from Claude's scoping of it."""
+    name = re.sub(r"[^\w.-]", "_", Path(filename or "").name)[:80].strip("._")
+    if not name:
+        name = re.sub(r"[^\w.-]", "_", scoped["filename"])[:80].strip("._") or (
+            "work.md" if kind == "writing" else "work.txt")
+    return {
+        "id": "own",
+        "title": scoped["title"],
+        "kind": kind,
+        "language": scoped["language"] or ("markdown" if kind == "writing" else "text"),
+        "concepts": concepts,
+        "filename": name,
+        "commit_message": scoped["commit_message"],
+        "teach_back": scoped["teach_back"],
+        "request": request,
+        "material": material,
+        "own": True,
+    }
 
 
 def _ago(days: float) -> str:
@@ -116,7 +148,12 @@ def _ev(store, concept, signal, passed=None, detail=None, ref=None, days=1.0):
 
 
 def seed(store: LearnerStore, profile: str) -> None:
-    """Give a fresh learner store a plausible six-week history for one profile."""
+    """Give a fresh learner store a plausible six-week history for one profile.
+
+    "You" starts empty: everything in that model comes from the visitor's own tasks.
+    """
+    if PROFILES[profile].get("own"):
+        return
     _occur(store, DI, [("past-di", 30)], description="Passing collaborators in rather than constructing them")
     _ev(store, DI, "question", detail="1", ref="past-di", days=30)
 

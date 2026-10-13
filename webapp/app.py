@@ -15,10 +15,12 @@ import threading
 import time
 import uuid
 from collections import defaultdict, deque
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -46,6 +48,12 @@ CREATE TABLE IF NOT EXISTS demo_runs (
     id      TEXT PRIMARY KEY,
     payload TEXT NOT NULL,
     at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS demo_revealed (
+    run_id TEXT NOT NULL,
+    gap_id TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    PRIMARY KEY (run_id, gap_id)
 );
 CREATE TABLE IF NOT EXISTS demo_meta (
     key   TEXT PRIMARY KEY,
@@ -168,6 +176,28 @@ def save_run(store: LearnerStore, run_id: str, run: dict) -> None:
         store.conn.execute("INSERT OR REPLACE INTO demo_runs (id, payload) VALUES (?, ?)", (run_id, json.dumps(run)))
 
 
+_run_locks: dict[str, threading.Lock] = defaultdict(threading.Lock)
+
+
+@contextmanager
+def editing_run(store: LearnerStore, run_id: str, open_only: bool = True):
+    """Read, change and save a run as one step, so concurrent requests never drop each other's changes.
+
+    Slow work (Claude calls) happens before this, on a separate read; only the change itself is locked.
+    """
+    with _seed_locks_guard:
+        lock = _run_locks[run_id]
+    with lock:
+        run_state = load_run(store, run_id, open_only)
+        yield run_state
+        save_run(store, run_id, run_state)
+
+
+def task_of(run_state: dict) -> dict:
+    """The task a run was started for: a bundled one, or the visitor's own."""
+    return run_state.get("task") or content.TASKS[run_state["task_id"]]
+
+
 def snapshot(store: LearnerStore) -> dict:
     """The learner model as the UI shows it."""
     concepts = []
@@ -194,9 +224,17 @@ def event(result: dict, label: str) -> dict | None:
 # -- API ---------------------------------------------------------------------
 
 
+class OwnTask(BaseModel):
+    kind: Literal["code", "writing"]
+    request: str = Field(min_length=10, max_length=2000, description="What Claude should do")
+    material: str = Field("", max_length=content.OWN_MATERIAL_LIMIT, description="Your code or notes")
+    filename: str = Field("", max_length=200, description="Name of the file the material came from")
+
+
 class RunRequest(BaseModel):
-    task_id: str = Field(examples=["retry"])
+    task_id: str = Field("retry", examples=["retry"], description="A bundled task, or \"own\" with `own` set")
     profile: str = Field(examples=["developing"])
+    own: OwnTask | None = Field(None, description="Your own task. Needs live Claude.")
     live: bool = True
 
 
@@ -243,6 +281,7 @@ def catalog():
         "tasks": list(content.TASKS.values()),
         "profiles": list(content.PROFILES.values()),
         "live_available": bool(os.environ.get("ANTHROPIC_API_KEY")),
+        "own_material_limit": content.OWN_MATERIAL_LIMIT,
     }
 
 
@@ -250,6 +289,17 @@ def catalog():
 def model(profile: str, request: Request, response: Response):
     """A learner's model: concepts, levels, recent level changes, criteria, flags."""
     return snapshot(learner(visitor(request, response), profile))
+
+
+@app.get("/api/model/{profile}/export")
+def export(profile: str, request: Request, response: Response):
+    """Everything recorded about a learner: concepts, levels, evidence and the rules that changed them."""
+    store = learner(visitor(request, response), profile)
+    ids = [r[0] for r in store.conn.execute("SELECT concept_id FROM concept_state ORDER BY concept_id")]
+    body = {"profile": profile, "exported_at": now(), "concepts": [store.explain(cid) for cid in ids],
+            "report": report.build(store.conn)}
+    return JSONResponse(body, headers={
+        "Content-Disposition": f'attachment; filename="claude-learn-{profile}.json"', **response.headers})
 
 
 @app.post("/api/reset")
@@ -266,26 +316,29 @@ def reset(body: ProfileRequest, request: Request, response: Response):
 
 @app.post("/api/run")
 def run(body: RunRequest, request: Request, response: Response):
-    """Claude does the task for this learner, choosing interventions from their model."""
-    task = content.TASKS.get(body.task_id)
-    if task is None:
-        raise HTTPException(404, f"Unknown task {body.task_id!r}")
+    """Claude does the task for this learner, choosing interventions from their model.
+
+    Use a bundled `task_id`, or set `own` to bring your own task (needs live Claude).
+    """
     store = learner(visitor(request, response), body.profile)
     run_id = uuid.uuid4().hex[:12]
+    if body.own:
+        task = scope_own_task(store, body.own, request, body.live)
+    else:
+        task = content.TASKS.get(body.task_id)
+        if task is None:
+            raise HTTPException(404, f"Unknown task {body.task_id!r}")
     store.start_session(run_id)
     for name in task["concepts"]:
         store.record_concept(name, context_id=run_id)
     context = store.context(task["concepts"], session_id=run_id)
     allowed = {k for c in context["concepts"] for k in c["plan"]["interventions"]}
-    started_at = now()
-    levels_at_start = {
-        r["name"]: r["level"] for r in store.conn.execute(
-            "SELECT c.name, s.level FROM concepts c JOIN concept_state s ON s.concept_id = c.id")
-    }
 
     try:
         out, source, note = live(request, body.live, claude.run_task, task, context), "live", ""
     except claude.Unavailable as exc:
+        if task.get("own"):
+            raise HTTPException(503, f"Claude couldn't do this task right now ({exc}). Try again in a minute.")
         out, matched = claude.recorded_run(task["id"], body.profile, allowed)
         source = "recorded"
         note = str(exc) if matched else (
@@ -326,7 +379,7 @@ def run(body: RunRequest, request: Request, response: Response):
 
     prediction_kind = "prediction" if "prediction" in allowed else "what_if"
     run_state = {
-        "task_id": task["id"], "profile": body.profile, "source": source, "note": note,
+        "task_id": task["id"], "task": task, "profile": body.profile, "source": source, "note": note,
         "plan": [{"name": c["name"], "level": c["level"], "level_name": c["level_name"], "track": c["track"],
                   "interventions": c["plan"]["interventions"]} for c in context["concepts"]],
         "orientation": out["orientation"], "decision_notes": out["decision_notes"],
@@ -334,9 +387,30 @@ def run(body: RunRequest, request: Request, response: Response):
         "critique_invitation": out["critique_invitation"], "takeaway": out["takeaway"],
         "scaffold": scaffold, "gaps": gaps,
     }
-    save_run(store, run_id, {**run_state, "baseline": baseline, "spans": spans,
-                             "started_at": started_at, "levels_at_start": levels_at_start})
+    save_run(store, run_id, {**run_state, "baseline": baseline, "spans": spans})
     return {"run_id": run_id, **run_state, "model": snapshot(store)}
+
+
+def scope_own_task(store: LearnerStore, own: OwnTask, request: Request, want_live: bool) -> dict:
+    """Ask Claude which concepts the visitor's task involves, and resolve them against their model."""
+    known = [r[0] for r in store.conn.execute("SELECT name FROM concepts ORDER BY name LIMIT 60")]
+    try:
+        scoped = live(request, want_live, claude.scope_task, own.kind, own.request, own.material, known)
+    except claude.Unavailable as exc:
+        raise HTTPException(503, f"Your own tasks need live Claude ({exc}). Turn on Live Claude, or try a bundled task.")
+    names = []
+    if not scoped["personal"]:
+        for c in scoped["concepts"][:3]:
+            rec = store.record_concept(c["name"], c["description"], domain=own.kind)
+            if "concept_id" in rec:
+                # Matching may map Claude's wording onto a concept the learner already has.
+                name = store.conn.execute("SELECT name FROM concepts WHERE id = ?", (rec["concept_id"],)).fetchone()[0]
+                if name not in names:
+                    names.append(name)
+    if not names:
+        raise HTTPException(422, "This looks like a personal topic (HR, health or legal). claude-learn doesn't "
+                                 "track those as learning; ask Claude directly instead.")
+    return content.own_task(own.kind, own.request, own.material, own.filename, scoped, names)
 
 
 @app.post("/api/runs/{run_id}/predict")
@@ -344,7 +418,7 @@ def predict(run_id: str, body: AnswerRequest, request: Request, response: Respon
     """Grade the learner's answer to the prediction question; it becomes evidence."""
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
+    task = task_of(run_state)
     question = run_state["prediction_prompt"]
     if not question:
         raise HTTPException(400, "This run has no prediction question.")
@@ -365,7 +439,7 @@ def skip(run_id: str, body: ProfileRequest, request: Request, response: Response
     """Skip the prediction question. Allowed and logged; never counted against the learner."""
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
+    task = task_of(run_state)
     store.record_intervention(task["concepts"][0], run_state["prediction_kind"],
                               run_state["prediction_prompt"] or "-", "skipped", session_id=run_id)
     return {"model": snapshot(store)}
@@ -376,14 +450,21 @@ def submit(run_id: str, body: SubmitRequest, request: Request, response: Respons
     """Review the learner's version against the baseline; verdicts become evidence."""
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
+    reviewed, source, events = review_gaps(store, run_id, run_state, body.text, request, body.live)
+    owned, more = record_ownership(store, run_id, run_state, body.text, reviewed)
+    return {**reviewed, "source": source, "ownership": owned, "events": events + more, "model": snapshot(store)}
+
+
+def review_gaps(store: LearnerStore, run_id: str, run_state: dict, text: str, request: Request,
+                want_live: bool) -> tuple[dict, str, list[dict]]:
+    """Review the learner's version gap by gap; verdicts become evidence."""
+    task = task_of(run_state)
     gaps = run_state["gaps"]
     try:
-        reviewed = live(request, body.live, claude.review, task, run_state["baseline"],
-                        run_state["scaffold"], body.text, gaps)
+        reviewed = live(request, want_live, claude.review, task, run_state["baseline"], run_state["scaffold"], text, gaps)
         source = "live"
     except claude.Unavailable:
-        reviewed, source = claude.heuristic_review(run_state["spans"], body.text, gaps), "offline"
+        reviewed, source = claude.heuristic_review(run_state["spans"], text, gaps), "offline"
 
     by_id = {g["gap_id"]: g for g in gaps}
     events = []
@@ -393,23 +474,40 @@ def submit(run_id: str, body: SubmitRequest, request: Request, response: Respons
             continue
         v = verdict["verdict"]
         if v in ("as_expected", "different"):
-            result = store.update_withheld(gap["item_id"], v)
+            result = store.update_withheld(gap["item_id"], v, ref=run_id)
         elif v == "incorrect":
             result = store.record_evidence(gap["concept"], "gap_completion", False, detail="incorrect", ref=run_id)
         else:
             continue
         if e := event(result, f"gap {gap['gap_id']}: {v.replace('_', ' ')}"):
             events.append(e)
+    return reviewed, source, events
 
+
+def reference_text(run_id: str, store: LearnerStore, run_state: dict) -> str:
+    """Everything Claude wrote for this run: the scaffold, plus any answers it revealed."""
+    revealed = [r[0] for r in store.conn.execute("SELECT answer FROM demo_revealed WHERE run_id = ?", (run_id,))]
+    return "\n".join([run_state["scaffold"], *revealed])
+
+
+def record_ownership(store: LearnerStore, run_id: str, run_state: dict, text: str,
+                     reviewed: dict | None = None) -> tuple[dict, list[dict]]:
+    """Who wrote what in this version. Recorded once per distinct version, so resubmitting adds nothing."""
+    task = task_of(run_state)
     # Answers Claude revealed are Claude's lines too, wherever the learner pastes them.
-    reference = "\n".join([run_state["scaffold"], *run_state.get("revealed", {}).values()])
-    owned = drafts.ownership(reference, body.text)
+    owned = drafts.ownership(reference_text(run_id, store, run_state), text)
     primary = task["concepts"][0]
-    store.record_evidence(primary, "draft_ownership", None, detail=str(owned["learner_share"]), ref=run_id)
-    if reviewed.get("caught_issue"):
+    events = []
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    with editing_run(store, run_id, open_only=False) as current:
+        fresh = current.get("ownership_recorded_for") != digest
+        current["ownership_recorded_for"] = digest
+    if fresh:
+        store.record_evidence(primary, "draft_ownership", None, detail=str(owned["learner_share"]), ref=run_id)
+    if reviewed and reviewed.get("caught_issue"):
         if e := event(store.record_evidence(primary, "substantive_fix", True, ref=run_id), "caught an issue in Claude's draft"):
             events.append(e)
-    return {**reviewed, "source": source, "ownership": owned, "events": events, "model": snapshot(store)}
+    return owned, events
 
 
 @app.post("/api/runs/{run_id}/discuss")
@@ -422,7 +520,7 @@ def discuss(run_id: str, body: DiscussRequest, request: Request, response: Respo
     """
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
+    task = task_of(run_state)
     history = run_state.setdefault("discussion", [])
     if sum(t["role"] == "user" for t in history) >= MAX_DISCUSSION_MESSAGES:
         raise HTTPException(400, "This conversation is long enough for one run. Start the task again to keep going.")
@@ -452,8 +550,9 @@ def discuss(run_id: str, body: DiscussRequest, request: Request, response: Respo
         result = store.record_evidence(concept, "critique", out["pushback_valid"], ref=run_id)
         label = "pushback: Claude agreed" if out["pushback_valid"] else "pushback: Claude explained the trade-off"
 
-    history += [{"role": "user", "content": body.message}, {"role": "assistant", "content": out["reply"]}]
-    save_run(store, run_id, run_state)
+    with editing_run(store, run_id) as current:
+        current.setdefault("discussion", []).extend(
+            [{"role": "user", "content": body.message}, {"role": "assistant", "content": out["reply"]}])
     events = [e for e in [event(result, label)] if e] if label else []
     return {**out, "concept": concept, "source": "live", "events": events, "model": snapshot(store)}
 
@@ -466,7 +565,9 @@ class FinishCheckRequest(BaseModel):
 
 class CompleteRequest(BaseModel):
     profile: str
-    text: str = Field(max_length=40000)
+    text: str | None = Field(None, max_length=40000, description=(
+        "The version to finish. Optional after a final check, which fixes the version; if given, it must match."))
+    live: bool = True
 
 
 @app.post("/api/runs/{run_id}/finish/check")
@@ -474,13 +575,14 @@ def finish_check(run_id: str, body: FinishCheckRequest, request: Request, respon
     """Finish step 1: a final, non-blocking review of the version the learner will use."""
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
+    task = task_of(run_state)
     try:
         out, source = live(request, body.live, claude.final_check, task, run_state["baseline"], body.text), "live"
     except claude.Unavailable:
         out, source = claude.heuristic_final_check(task, body.text), "offline"
-    run_state["final"] = {"check": out}
-    save_run(store, run_id, run_state)
+    # The checked version is the one that gets explained and finished.
+    with editing_run(store, run_id) as current:
+        current["final"] = {"check": out, "text": body.text}
     return {**out, "source": source}
 
 
@@ -489,16 +591,19 @@ def finish_explain(run_id: str, body: AnswerRequest, request: Request, response:
     """Finish step 2: explain it back. Graded retrieval practice; optional."""
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
-    question = run_state.get("final", {}).get("check", {}).get("teach_back_question") or task["teach_back"]
+    task = task_of(run_state)
+    final = run_state.get("final", {})
+    question = final.get("check", {}).get("teach_back_question") or task["teach_back"]
+    # Graded against the learner's own final version: a valid change of approach is not a wrong answer.
+    solution = final.get("text") or run_state["baseline"]
     try:
-        graded, source = live(request, body.live, claude.grade, task, question, body.answer, run_state["baseline"]), "live"
+        graded, source = live(request, body.live, claude.grade, task, question, body.answer, solution), "live"
     except claude.Unavailable:
         graded, source = claude.heuristic_grade(), "offline"
     result = store.record_intervention(task["concepts"][0], "retrieval", question, graded["outcome"],
                                        response=body.answer, session_id=run_id)
-    run_state.setdefault("final", {}).update(explained=True, teach_back=graded["outcome"])
-    save_run(store, run_id, run_state)
+    with editing_run(store, run_id) as current:
+        current.setdefault("final", {}).update(explained=True, teach_back=graded["outcome"])
     events = [e for e in [event(result, f"explained it back: {graded['outcome']}")] if e]
     return {**graded, "question": question, "source": source, "events": events, "model": snapshot(store)}
 
@@ -508,15 +613,31 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
     """Finish steps 3 and 4: close the run; summarize it; hand over the file and its commit."""
     store = learner(visitor(request, response), body.profile)
     run_state = load_run(store, run_id)
-    task = content.TASKS[run_state["task_id"]]
-    final = run_state.setdefault("final", {})
+    task = task_of(run_state)
+    final = run_state.get("final", {})
+    text = final.get("text")
+    if text is None:
+        if body.text is None:
+            raise HTTPException(400, "Send the text to finish, or run the final check first.")
+        text = body.text
+    elif body.text is not None and body.text != text:
+        raise HTTPException(409, "The draft changed after the final check. Run the check again on this version.")
+
+    # Gaps filled since the last submit still earn credit: review them before the run closes.
+    open_gaps = [g for g in run_state["gaps"] if store.get_baseline(g["item_id"])["status"] not in REVIEWED]
+    if any(g["gap_id"] not in drafts.unfilled(text) for g in open_gaps):
+        review_gaps(store, run_id, run_state, text, request, body.live)
+
+    with editing_run(store, run_id) as current:
+        final = current.setdefault("final", {})
+        current["finished"] = True
+        final["text"] = text
     if not final.get("explained"):
         question = final.get("check", {}).get("teach_back_question") or task["teach_back"]
         store.record_intervention(task["concepts"][0], "retrieval", question, "skipped", session_id=run_id)
 
     # What you built: who wrote what in the final version.
-    reference = "\n".join([run_state["scaffold"], *run_state.get("revealed", {}).values()])
-    owned = drafts.ownership(reference, body.text)
+    owned, _ = record_ownership(store, run_id, run_state, text)
     by_class: dict[str, list[int]] = {}
     for number, line in enumerate(owned["lines"], start=1):
         if line["cls"] != "blank":
@@ -524,18 +645,17 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
     note = {"session": run_id, "files": {task["filename"]: {k: _ranges(v) for k, v in by_class.items()}}}
     trailers = "\n\nAssisted-by: Claude\nClaude-Session: " + run_id if by_class.get("claude") or by_class.get("claude_modified") else ""
 
-    # What changed in your model during this run.
-    started = run_state.get("started_at", now())
-    levels_now = {r["name"]: r["level"] for r in store.conn.execute(
-        "SELECT c.name, s.level FROM concepts c JOIN concept_state s ON s.concept_id = c.id")}
-    before = run_state.get("levels_at_start", {})
-    changes = [{"concept": name, "from": before.get(name, 0), "to": level}
-               for name, level in levels_now.items() if level != before.get(name, 0)]
+    # What changed in your model because of this run: only evidence recorded for this run counts,
+    # so work in another tab never shows up here.
     rules = [dict(r) for r in store.conn.execute(
         "SELECT c.name AS concept, o.rule_id, o.from_level, o.to_level FROM rule_observations o"
-        " JOIN concepts c ON c.id = o.concept_id"
-        " WHERE o.passed = 1 AND o.from_level != o.to_level AND o.at >= ? ORDER BY o.id", (started,))]
-    observations = store.conn.execute("SELECT COUNT(*) FROM evidence WHERE at >= ?", (started,)).fetchone()[0]
+        " JOIN evidence e ON e.id = o.evidence_id JOIN concepts c ON c.id = o.concept_id"
+        " WHERE e.ref = ? AND o.passed = 1 AND o.from_level != o.to_level ORDER BY o.id", (run_id,))]
+    first_last: dict[str, list[int]] = {}
+    for r in rules:
+        first_last.setdefault(r["concept"], [r["from_level"], r["to_level"]])[1] = r["to_level"]
+    changes = [{"concept": c, "from": a, "to": b} for c, (a, b) in first_last.items() if a != b]
+    observations = store.conn.execute("SELECT COUNT(*) FROM evidence WHERE ref = ?", (run_id,)).fetchone()[0]
 
     # What's next: when each concept comes back, and what Claude will do then.
     upcoming = []
@@ -546,9 +666,6 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
         upcoming.append({"concept": c["name"], "level": c["level"], "level_name": c["level_name"],
                          "track": c["track"], "review_on": due, "next_plan": c["plan"]["interventions"]})
 
-    final.update(text=body.text)
-    run_state["finished"] = True
-    save_run(store, run_id, run_state)
     return {
         "check": final.get("check"),
         "ownership": owned,
@@ -557,7 +674,7 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
         "observations": observations,
         "teach_back": final.get("teach_back"),
         "upcoming": upcoming,
-        "file": {"name": task["filename"], "content": body.text},
+        "file": {"name": task["filename"], "content": text},
         "commit": {"message": task["commit_message"] + trailers, "note": note},
         "model": snapshot(store),
     }
@@ -571,9 +688,11 @@ def reveal(run_id: str, body: RevealRequest, request: Request, response: Respons
     gap = next((g for g in run_state["gaps"] if g["gap_id"] == body.gap_id), None)
     if gap is None:
         raise HTTPException(404, "Unknown gap")
-    result = store.update_withheld(gap["item_id"], "handed_back")
-    run_state.setdefault("revealed", {})[gap["gap_id"]] = run_state["spans"][gap["gap_id"]]
-    save_run(store, run_id, run_state)
+    result = store.update_withheld(gap["item_id"], "handed_back", ref=run_id)
+    # One row per revealed answer, so two reveals at once can't overwrite each other.
+    with store.conn:
+        store.conn.execute("INSERT OR REPLACE INTO demo_revealed (run_id, gap_id, answer) VALUES (?, ?, ?)",
+                           (run_id, gap["gap_id"], run_state["spans"][gap["gap_id"]]))
     events = [e for e in [event(result, f"gap {gap['gap_id']}: handed back")] if e]
     return {"gap_id": gap["gap_id"], "answer": run_state["spans"][gap["gap_id"]], "events": events,
             "model": snapshot(store)}

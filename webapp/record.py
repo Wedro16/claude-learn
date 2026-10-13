@@ -38,7 +38,7 @@ def record(task_id: str, profile: str) -> Path:
 def main() -> None:
     tasks = sys.argv[1:] or list(content.TASKS)
     for task_id in tasks:
-        for profile in content.PROFILES:
+        for profile in (p for p, info in content.PROFILES.items() if not info.get("own")):
             print(f"recording {task_id} / {profile} ...", flush=True)
             print(f"  wrote {record(task_id, profile)}")
 

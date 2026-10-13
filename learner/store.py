@@ -182,7 +182,7 @@ class LearnerStore:
             raise NotFound(f"No withheld item {item_id!r}")
         return dict(row)
 
-    def update_withheld(self, item_id: str, status: str, commit_sha: str | None = None) -> dict:
+    def update_withheld(self, item_id: str, status: str, commit_sha: str | None = None, ref: str | None = None) -> dict:
         item = self.get_baseline(item_id)
         if item["status"] in REVIEWED:
             # A gap is reviewed once; repeating it would count the same work twice.
@@ -195,7 +195,7 @@ class LearnerStore:
         if status in REVIEWED and item["concept_id"]:
             return self.record_evidence(
                 item["concept_id"], "gap_completion", status != "handed_back", detail=status,
-                ref=commit_sha or item["commit_sha"],
+                ref=commit_sha or item["commit_sha"] or ref,
             )
         return {"item_id": item_id, "status": status}
 

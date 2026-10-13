@@ -25,11 +25,22 @@
 <section class="howto" id="howto">
   <strong>Try it:</strong>
   <ol>
-    <li>Pick a learner and a task, then <b>Start</b>. Claude does the task, adapted to that learner.</li>
+    <li>Pick a learner and a task, then <b>Start</b>. Claude does the task, adapted to that learner. Or pick <b>Your own task</b> and bring real work.</li>
     <li>Answer Claude's question and fill the <code>TODO(learner)</code> gap (or ask for Claude's version), then <b>Submit</b>.</li>
     <li>Watch the learner model on the right update. Then run the same task as a different learner and compare.</li>
   </ol>
-  <p class="muted">Learner histories are synthetic demo data. Your sandbox is private to this browser.</p>
+  <p class="muted">Sam, Priya and Alex have synthetic histories; <b>You</b> starts empty. Your sandbox is private to this browser.</p>
+  <details class="outside">
+    <summary>Use it outside this page</summary>
+    <ul>
+      <li><b>From code, over HTTP.</b> Every step on this page is an API call, listed at <a href="/docs" target="_blank" rel="noopener">/docs</a>. To run your own work, <code>POST /api/run</code> with an <code>own</code> task.</li>
+      <li><b>In Claude Code, on your machine.</b> The same learner engine runs inside Claude Code on your Claude subscription. It works on your files as you go, and finishing a task is a git commit with attribution. Requires Python 3.10+ and Claude Code.
+        <pre>git clone https://github.com/Wedro16/claude-learn
+cd claude-learn &amp;&amp; scripts/install.sh
+claude</pre>
+        The setup applies to that repository, so do your work inside it. Your learner data stays on your machine, in <code>~/.claude-learn</code>. Details are in the <a href="https://github.com/Wedro16/claude-learn#readme" target="_blank" rel="noopener">README</a>.</li>
+    </ul>
+  </details>
 </section>
 
 <main class="grid">
@@ -43,6 +54,29 @@
   </aside>
 
   <section class="workspace" id="workspace">
+    <div class="card hidden own-form" id="own-form">
+      <h3>Your own task</h3>
+      <p class="muted">Claude does the work and teaches it, adapted to what <b id="own-who">you</b> already know. What you add here goes to Claude for this task only, and is kept only in this browser's sandbox on the demo server (up to 7 days). Don't paste secrets or confidential material.</p>
+      <label>Kind
+        <select id="own-kind"><option value="code">Code</option><option value="writing">Writing</option></select>
+      </label>
+      <label>What should Claude do?
+        <textarea id="own-request" rows="3" maxlength="2000" placeholder="e.g. Add input validation to this handler and return clear errors for each bad field"></textarea>
+      </label>
+      <label>Your code or notes <span class="muted">(optional; paste, upload, or load a public GitHub file)</span>
+        <textarea id="own-material" class="draft material" rows="10" spellcheck="false"></textarea>
+      </label>
+      <div class="row">
+        <label class="button secondary">Upload a file<input type="file" id="own-file" class="hidden" accept=".py,.js,.ts,.tsx,.jsx,.java,.go,.rb,.rs,.c,.cc,.cpp,.h,.cs,.php,.swift,.kt,.scala,.sql,.sh,.yaml,.yml,.json,.toml,.html,.css,.md,.markdown,.txt,.rst,.adoc,text/*"></label>
+        <input id="own-url" type="url" placeholder="https://github.com/owner/repo/blob/main/path/file.py">
+        <button id="own-load" class="secondary">Load</button>
+      </div>
+      <label>File name <span class="muted">(used for the download and the commit preview)</span>
+        <input id="own-filename" type="text" maxlength="200" placeholder="e.g. handler.py">
+      </label>
+      <p class="muted" id="own-note"></p>
+      <p class="muted">Then press <b>Start</b>. The first time a topic comes up, Claude explains its decisions; once it recurs, you'll get questions and parts to write yourself.</p>
+    </div>
     <div class="empty" id="empty">
       <p>Pick a learner and a task, then press <b>Start</b>.</p>
       <p class="muted">Suggested first run: <b>Priya</b> + <b>Make a flaky API call resilient</b>. Then try <b>Sam</b> and <b>Alex</b> on the same task.</p>
@@ -61,6 +95,7 @@
     <h3>Success signals</h3>
     <div id="criteria"></div>
     <div id="flags"></div>
+    <p class="muted"><a id="export" href="/api/model/developing/export" download>Download this learner's data (JSON)</a></p>
   </aside>
 </main>
 

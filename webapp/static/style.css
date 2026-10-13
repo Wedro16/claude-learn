@@ -170,3 +170,27 @@ button.secondary:hover { border-color: var(--accent); }
 .finish section:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
 h5 { font-size: 13px; margin: 12px 0 4px; }
 .commit { background: var(--code); border-radius: 8px; padding: 10px; overflow: auto; max-height: 280px; font-size: 12px; margin: 6px 0 0; }
+
+.outside { margin-top: 6px; font-size: 14px; }
+.outside summary { cursor: pointer; color: var(--accent); font-weight: 600; }
+.outside ul { margin: 6px 0; padding-left: 20px; }
+.outside li { margin-bottom: 6px; }
+.outside pre { background: var(--code); border-radius: 8px; padding: 8px 10px; margin: 6px 0; overflow: auto; font-size: 12px; }
+.model a { color: var(--accent); }
+
+.pick.own { border-style: dashed; }
+.own-form label { display: block; margin-top: 10px; font-weight: 600; font-size: 14px; }
+.own-form label .muted { font-weight: 400; }
+.own-form textarea, .own-form select, .own-form input[type="text"], .own-form input[type="url"] { margin-top: 4px; font-weight: 400; }
+.own-form select, .own-form input[type="text"], .own-form input[type="url"] {
+  border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; background: var(--bg); color: var(--ink); font: inherit;
+}
+.own-form input[type="text"] { width: 100%; }
+.own-form .row input[type="url"] { flex: 1; min-width: 200px; }
+.own-form .row label.button { margin: 0; display: inline-block; font-weight: 400; }
+textarea.draft.material { min-height: 180px; }
+.error { color: var(--bad); }
+textarea.draft.locked { opacity: .85; background: var(--code); }
+.own-form label.button { background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; font-size: 15px; }
+.own-form label.button:hover { border-color: var(--accent); }
+.howto a { color: var(--accent); }

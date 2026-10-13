@@ -19,7 +19,14 @@ This repository has two parts that share one learner engine (`learner/`):
 Bundled content, so reviewers need nothing of their own:
 
 - Three synthetic learners: Sam (new to the topic), Priya (building the skill), Alex (experienced).
+  A fourth, **You**, starts empty and builds from your own tasks.
 - Two tasks: make a flaky API call resilient (code) and explain a design decision to a reviewer (writing).
+- **Your own task**: describe the work and paste, upload, or load a public GitHub file (fetched by
+  the browser, not the server; up to 20,000 characters). Claude first names the 1-3 concepts the task
+  involves, reusing ones already in your model, then does it to your plan. Needs live Claude.
+  Personal topics (HR, health, legal) aren't tracked. Material is kept only in your browser's
+  sandbox on the server, for up to 7 days.
+- "Download this learner's data" exports everything recorded about a learner as JSON.
 - "Live Claude" calls Claude Opus 5.5 (about 20-40 s). Unchecked, it replays a recorded live
   response instantly. Over the rate limit, it falls back to recordings automatically.
 - "Talk it through with Claude": explain the reasoning behind an edit, ask why, or push back on
@@ -29,7 +36,7 @@ Bundled content, so reviewers need nothing of their own:
   blocks), an optional explain-it-back question, a summary of what you built and what changed in
   your learner model (with when each concept comes back for review), and the file to copy or
   download, shown alongside the commit it would become in Claude Code.
-- API docs at `/docs`.
+- API docs at `/docs`. `POST /api/run` with an `own` task runs your own work over HTTP.
 
 Run locally:
 

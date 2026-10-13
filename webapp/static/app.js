@@ -40,8 +40,91 @@ function renderPickers() {
   }, el("strong", {}, p.name), el("span", {}, p.summary))));
   $("#tasks").replaceChildren(...tasks.map((t) => el("button", {
     class: "pick", "aria-pressed": String(t.id === state.task),
-    onclick: () => { state.task = t.id; renderPickers(); },
-  }, el("strong", {}, t.title), el("span", {}, `${t.kind === "code" ? "Code" : "Writing"}: ${t.request}`))));
+    onclick: () => { state.task = t.id; renderPickers(); showIdle(); },
+  }, el("strong", {}, t.title), el("span", {}, `${t.kind === "code" ? "Code" : "Writing"}: ${t.request}`))),
+  el("button", {
+    class: "pick own", "aria-pressed": String(state.task === "own"),
+    onclick: () => {
+      state.task = "own";
+      // Your own work builds your own learner model, so "You" is the natural learner.
+      if (state.profile !== "you" && !state.run) { state.profile = "you"; loadModel(); }
+      renderPickers();
+      showIdle();
+    },
+  }, el("strong", {}, "Your own task"), el("span", {}, "Paste, upload or link your own code or writing. Needs Live Claude.")));
+  $("#reset").textContent = state.profile === "you" ? "Clear your history" : "Reset this learner's history";
+  $("#export").href = `/api/model/${state.profile}/export`;
+}
+
+// What the workspace shows when no run is on screen: the own-task form, or the hint.
+function showIdle() {
+  if (state.run) return;
+  const own = state.task === "own";
+  $("#own-form").classList.toggle("hidden", !own);
+  $("#empty").classList.toggle("hidden", own);
+  if (own) $("#own-who").textContent = profileName(state.profile);
+}
+
+// -- your own task -------------------------------------------------------------
+
+const WRITING_FILE = /\.(md|markdown|txt|rst|adoc|tex)$/i;
+
+function setMaterial(text, name) {
+  const limit = state.catalog.own_material_limit;
+  if (text.length > limit) throw new Error(`That's ${text.length.toLocaleString()} characters; the limit is ${limit.toLocaleString()}. Paste the part that matters.`);
+  $("#own-material").value = text;
+  if (name) {
+    $("#own-filename").value = name;
+    $("#own-kind").value = WRITING_FILE.test(name) ? "writing" : "code";
+  }
+  ownNote(name ? `Loaded ${name} (${text.split("\n").length} lines).` : "");
+}
+
+function ownNote(text, error = false) {
+  $("#own-note").textContent = text;
+  $("#own-note").classList.toggle("error", error);
+}
+
+async function uploadFile(event) {
+  const file = event.target.files[0];
+  event.target.value = "";
+  if (!file) return;
+  try {
+    if (file.size > state.catalog.own_material_limit * 4) throw new Error("That file is too large; paste the part that matters.");
+    const text = await file.text();
+    if (text.includes("\u0000")) throw new Error("That looks like a binary file. Upload code or text (Markdown, plain text).");
+    setMaterial(text, file.name);
+  } catch (err) {
+    ownNote(err.message, true);
+  }
+}
+
+// Public GitHub files load straight into the browser: nothing is fetched by the server.
+function rawGitHubUrl(input) {
+  let url;
+  try { url = new URL(input.trim()); } catch { url = null; }
+  if (url && url.protocol === "https:" && url.hostname === "raw.githubusercontent.com") return url.href;
+  const m = url && url.protocol === "https:" && url.hostname === "github.com" && url.pathname.match(/^\/([^/]+)\/([^/]+)\/blob\/(.+)$/);
+  if (m) return `https://raw.githubusercontent.com/${m[1]}/${m[2]}/${m[3]}`;
+  throw new Error("Use a public GitHub file link (github.com/owner/repo/blob/branch/path) or a raw.githubusercontent.com link.");
+}
+
+async function loadGitHub() {
+  try {
+    const raw = rawGitHubUrl($("#own-url").value);
+    ownNote("Loading…");
+    const res = await fetch(raw);
+    if (!res.ok) throw new Error(`GitHub returned ${res.status}. Only public files can be loaded.`);
+    setMaterial(await res.text(), decodeURIComponent(raw.split("/").pop()));
+  } catch (err) {
+    ownNote(err.message, true);
+  }
+}
+
+function ownTask() {
+  const request = $("#own-request").value.trim();
+  if (request.length < 10) throw new Error("Say what you want Claude to do (at least a sentence).");
+  return { kind: $("#own-kind").value, request, material: $("#own-material").value, filename: $("#own-filename").value.trim() };
 }
 
 // -- learner model -----------------------------------------------------------
@@ -95,8 +178,8 @@ function clearRun() {
   $("#result").classList.add("hidden");
   $("#result").replaceChildren();
   $("#events").replaceChildren();
-  $("#empty").classList.remove("hidden");
   setLoading(false);
+  showIdle();
 }
 
 // True when a response still belongs to the run on screen.
@@ -129,23 +212,45 @@ function withTimer(text) {
 }
 
 async function start() {
+  const own = state.task === "own";
+  let body;
+  try {
+    body = own
+      ? { task_id: "own", profile: state.profile, own: ownTask(), live: live() }
+      : { task_id: state.task, profile: state.profile, live: live() };
+  } catch (err) {
+    ownNote(err.message, true);
+    return;
+  }
+  if (own && !live()) {
+    ownNote("Your own tasks need Live Claude: there's no recording of them to replay.", true);
+    return;
+  }
+  ownNote("");
+  state.run = null;
   $("#empty").classList.add("hidden");
+  $("#own-form").classList.add("hidden");
   $("#result").classList.add("hidden");
   const seq = ++state.runSeq;
   const profile = state.profile;
-  const done = withTimer(live()
-    ? "Claude is doing the task and deciding what to leave for the learner…"
-    : "Loading the recorded response…");
+  const done = withTimer(own
+    ? "Claude is reading your task, naming what it teaches, and doing it…"
+    : live() ? "Claude is doing the task and deciding what to leave for the learner…" : "Loading the recorded response…");
   try {
-    const run = await api("/api/run", { task_id: state.task, profile, live: live() });
+    const run = await api("/api/run", body);
     if (seq !== state.runSeq || profile !== state.profile) return;  // superseded while in flight
     state.run = run;
     renderRun(run);
     applyUpdate(run);
   } catch (err) {
     if (seq !== state.runSeq) return;
-    $("#empty").classList.remove("hidden");
-    $("#empty").replaceChildren(el("p", {}, `Something went wrong: ${err.message}`));
+    if (own) {
+      showIdle();
+      ownNote(err.message, true);
+    } else {
+      $("#empty").classList.remove("hidden");
+      $("#empty").replaceChildren(el("p", {}, `Something went wrong: ${err.message}`));
+    }
   } finally {
     done(seq === state.runSeq);
   }
@@ -194,7 +299,7 @@ function renderRun(run) {
   const name = profileName(run.profile);
 
   slot("source").textContent = run.source === "live"
-    ? "Live response from Claude Opus 5.5."
+    ? `Live response from Claude Opus 5.5${run.task.own ? ` · your task: ${run.task.title}` : ""}.`
     : `Recorded live response (instant replay).${run.note && run.note !== "recorded mode selected" ? ` ${run.note}` : ""}`;
   slot("plan").replaceChildren(el("span", { class: "muted" }, `Plan for ${name}:`), ...run.plan.map((c) =>
     el("span", { class: "chip" }, el("b", {}, c.name), ` · level ${c.level} · `,
@@ -213,7 +318,7 @@ function renderRun(run) {
     ? `Claude's draft, with ${run.gaps.length === 1 ? "a part" : "parts"} left for ${name}`
     : "Claude's draft";
   slot("draft").value = run.scaffold;
-  const writing = state.catalog.tasks.find((t) => t.id === run.task_id).kind === "writing";
+  const writing = run.task.kind === "writing";
   slot("draft").classList.toggle("wrap", writing);
   slot("ownership").classList.toggle("wrap", writing);
   slot("gaps").replaceChildren(...run.gaps.map((g) => el("div", { class: "gap", "data-gap": g.gap_id },
@@ -231,9 +336,11 @@ function renderRun(run) {
   }
   slot("takeaway").replaceChildren("Takeaway: ", mdInline(run.takeaway));
 
-  slot("chat-input").placeholder = writing
-    ? "e.g. I led with the Redis trade-off because a reviewer will ask about it first…"
-    : "e.g. I capped the delay because without a cap, attempt 10 would wait over 4 minutes…";
+  slot("chat-input").placeholder = run.task.own
+    ? "e.g. I changed this part because…, or: why did you choose…?"
+    : writing
+      ? "e.g. I led with the Redis trade-off because a reviewer will ask about it first…"
+      : "e.g. I capped the delay because without a cap, attempt 10 would wait over 4 minutes…";
   slot("chat-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send();
   });
@@ -242,7 +349,10 @@ function renderRun(run) {
   $('[data-action="skip"]', result).addEventListener("click", skip);
   $('[data-action="submit"]', result).addEventListener("click", submit);
   $('[data-action="finish"]', result).addEventListener("click", finishCheck);
-  $('[data-action="keep-editing"]', result).addEventListener("click", () => slot("finish-card").classList.add("hidden"));
+  $('[data-action="keep-editing"]', result).addEventListener("click", () => {
+    slot("finish-card").classList.add("hidden");
+    setFinishing(false);
+  });
   $('[data-action="continue"]', result).addEventListener("click", () => {
     $('[data-step="explain"]', result).classList.remove("hidden");
     $('[data-action="continue"]', result).parentElement.classList.add("hidden");
@@ -270,9 +380,9 @@ async function answer() {
     slot("prediction-card").querySelectorAll("button").forEach((b) => b.remove());
     applyUpdate(data);
   } catch (err) {
-    alert(err.message);
+    if (current(runId)) alert(err.message);
   } finally {
-    done();
+    done(current(runId));
   }
 }
 
@@ -310,7 +420,7 @@ async function send() {
     const recorded = RECORDED_AS[data.kind]?.(data);
     pending.className = "msg claude";
     pending.replaceChildren(...md(data.reply),
-      recorded ? el("div", { class: "tag" }, `Recorded ${recorded} · ${data.concept}`) : null);
+      ...(recorded ? [el("div", { class: "tag" }, `Recorded ${recorded} · ${data.concept}`)] : []));
     applyUpdate(data);
   } catch (err) {
     if (!current(runId)) return;
@@ -353,9 +463,9 @@ async function submit() {
     slot("review-card").scrollIntoView({ behavior: "smooth", block: "start" });
     applyUpdate(data);
   } catch (err) {
-    alert(err.message);
+    if (current(runId)) alert(err.message);
   } finally {
-    done();
+    done(current(runId));
   }
 }
 
@@ -369,6 +479,7 @@ async function finishCheck() {
     const data = await api(`/api/runs/${runId}/finish/check`, { profile: state.profile, text, live: live() });
     if (!current(runId)) return;
     state.final = { text, check: data };
+    setFinishing(true);
     const card = slot("finish-card");
     card.classList.remove("hidden");
     $('[data-step="explain"]', card).classList.add("hidden");
@@ -383,10 +494,21 @@ async function finishCheck() {
     slot("teach-q").replaceChildren(mdInline(data.teach_back_question));
     card.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
-    alert(err.message);
+    if (current(runId)) alert(err.message);
   } finally {
-    done();
+    done(current(runId));
   }
+}
+
+// While finishing, the checked version is the one that gets explained and handed over, so it can't change.
+function setFinishing(on) {
+  const result = $("#result");
+  slot("draft").readOnly = on;
+  slot("draft").classList.toggle("locked", on);
+  for (const action of ["submit", "finish"]) $(`[data-action="${action}"]`, result).classList.toggle("hidden", on);
+  slot("submit-note").textContent = on
+    ? "Locked while you finish: this is the version Claude checked. Choose Keep editing to change it."
+    : "Edit anything you like; Claude compares your version with the one it would have written.";
 }
 
 async function explainBack() {
@@ -402,10 +524,10 @@ async function explainBack() {
     fb.replaceChildren(el("span", { class: `badge ${data.outcome === "correct" ? "as_expected" : data.outcome === "partial" ? "different" : "incorrect"}` }, data.outcome), " ", mdInline(data.feedback));
     applyUpdate(data);
   } catch (err) {
-    alert(err.message);
+    if (current(runId)) alert(err.message);
     return;
   } finally {
-    done();
+    done(current(runId));
   }
   await complete();
 }
@@ -416,7 +538,7 @@ function summarize(data) {
   parts.push(el("h5", {}, "What you built"),
     el("p", {}, `${share}% of the lines in your final version are yours or edited by you.`),
     el("p", { class: "legend" }, el("span", { class: "claude" }, "Claude"), el("span", { class: "claude_modified" }, "Claude, edited by you"), el("span", { class: "human" }, "You")),
-    el("pre", { class: `ownership${state.catalog.tasks.find((t) => t.id === state.run.task_id).kind === "writing" ? " wrap" : ""}` },
+    el("pre", { class: `ownership${state.run.task.kind === "writing" ? " wrap" : ""}` },
       data.ownership.lines.map((l) => el("span", { class: l.cls }, l.text || " "))));
   parts.push(el("h5", {}, "What changed in your learner model"));
   parts.push(data.changes.length
@@ -442,9 +564,9 @@ function summarize(data) {
 
 async function complete() {
   const runId = state.run.run_id;
-  const done = withTimer("Wrapping up…");
+  const done = withTimer(live() ? "Wrapping up (Claude reviews any gaps you filled since your last submit)…" : "Wrapping up…");
   try {
-    const data = await api(`/api/runs/${runId}/finish/complete`, { profile: state.profile, text: state.final.text });
+    const data = await api(`/api/runs/${runId}/finish/complete`, { profile: state.profile, text: state.final.text, live: live() });
     if (!current(runId)) return;
     state.final.result = data;
     const card = slot("finish-card");
@@ -458,9 +580,9 @@ async function complete() {
     renderModel(data.model);
     $('[data-step="summary"]', card).scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
-    alert(err.message);
+    if (current(runId)) alert(err.message);
   } finally {
-    done();
+    done(current(runId));
   }
 }
 
@@ -497,7 +619,10 @@ function downloadWork() {
 }
 
 async function reset() {
-  if (!confirm(`Restore ${profileName(state.profile)}'s seeded history?`)) return;
+  const question = state.profile === "you"
+    ? "Clear everything recorded about you in this sandbox?"
+    : `Restore ${profileName(state.profile)}'s seeded history?`;
+  if (!confirm(question)) return;
   const profile = state.profile;
   clearRun();
   const model = await api("/api/reset", { profile });
@@ -514,7 +639,11 @@ async function reset() {
     $("#live").parentElement.title = "Live Claude isn't configured on this server; showing recorded responses.";
   }
   renderPickers();
+  showIdle();
   await loadModel();
   $("#start").addEventListener("click", start);
+  $("#own-file").addEventListener("change", uploadFile);
+  $("#own-load").addEventListener("click", loadGitHub);
+  $("#own-url").addEventListener("keydown", (e) => { if (e.key === "Enter") loadGitHub(); });
   $("#reset").addEventListener("click", reset);
 })();

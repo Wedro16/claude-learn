@@ -72,7 +72,7 @@ def test_ownership_classifies_lines():
 def test_catalog_lists_bundled_content(client):
     data = client.get("/api/catalog").json()
     assert {t["id"] for t in data["tasks"]} == {"retry", "rationale"}
-    assert {p["id"] for p in data["profiles"]} == {"novice", "developing", "proficient"}
+    assert {p["id"] for p in data["profiles"]} == {"you", "novice", "developing", "proficient"}
 
 
 def test_seeded_profiles_have_distinct_levels(client):
@@ -360,3 +360,102 @@ def test_offline_final_check_flags_unfinished_gaps(client):
                         json={"profile": "developing", "text": run["scaffold"], "live": False}).json()
     assert not check["ready"] and check["issues"][0]["severity"] == "blocking"
     assert check["teach_back_question"]
+
+
+def test_finishing_reviews_gaps_filled_since_the_last_submit(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    filled = run["scaffold"].replace(
+        "            # TODO(learner) gap-1: Compute the delay and sleep. Hint: Double each time, but cap it.",
+        "            delay = min(cap, base * 2 ** attempt)\n            time.sleep(random.uniform(0, delay))",
+    )
+    url = f"/api/runs/{run['run_id']}/finish"
+    client.post(f"{url}/check", json={"profile": "developing", "text": filled, "live": False})
+    done = client.post(f"{url}/complete", json={"profile": "developing", "live": False}).json()
+    assert {"concept": "retry with exponential backoff", "from": 2, "to": 3} in done["changes"]
+    assert done["file"]["content"] == filled
+
+
+def test_finishing_uses_the_checked_version(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    seen = {}
+    monkeypatch.setattr(claude, "grade", lambda task, q, answer, solution: seen.update(solution=solution)
+                        or {"outcome": "correct", "feedback": "Yes."})
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "novice"}).json()
+    url = f"/api/runs/{run['run_id']}/finish"
+    checked = run["scaffold"] + "\n# attempts=3 is enough here"
+    client.post(f"{url}/check", json={"profile": "novice", "text": checked})
+    client.post(f"{url}/explain", json={"profile": "novice", "answer": "three tries then it raises"})
+    assert seen["solution"] == checked  # graded against the learner's version, not Claude's
+    assert client.post(f"{url}/complete", json={"profile": "novice", "text": checked + "\n# later edit"}).status_code == 409
+    done = client.post(f"{url}/complete", json={"profile": "novice", "text": checked}).json()
+    assert done["file"]["content"] == checked
+
+
+def test_concurrent_reveals_keep_both_answers(client, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    two = {**RUN, "draft": DRAFT.replace("            [[/GAP]]\n", "            [[/GAP]]\n    [[GAP gap-2]]\n    return None\n    [[/GAP]]\n"),
+           "gaps": [dict(RUN["gaps"][0]), {**RUN["gaps"][0], "gap_id": "gap-2"}]}
+    monkeypatch.setattr(claude, "run_task", lambda *a: two)
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    assert len(run["gaps"]) == 2
+    url = f"/api/runs/{run['run_id']}/reveal"
+    with ThreadPoolExecutor(2) as pool:
+        list(pool.map(lambda g: client.post(url, json={"profile": "developing", "gap_id": g}), ["gap-1", "gap-2"]))
+    pasted = run["scaffold"].replace(
+        "            # TODO(learner) gap-1: Compute the delay and sleep. Hint: Double each time, but cap it.",
+        "            delay = min(cap, base * 2 ** attempt)\n            time.sleep(random.uniform(0, delay))",
+    ).replace("    # TODO(learner) gap-2: Compute the delay and sleep. Hint: Double each time, but cap it.", "    return None")
+    data = client.post(f"/api/runs/{run['run_id']}/submit", json={"profile": "developing", "text": pasted, "live": False}).json()
+    assert data["ownership"]["totals"]["human"] == 0
+
+
+def test_summary_counts_only_this_runs_evidence(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    a = client.post("/api/run", json={"task_id": "retry", "profile": "novice"}).json()
+    b = client.post("/api/run", json={"task_id": "rationale", "profile": "novice"}).json()
+    # Work in run B (another tab) moves a level...
+    client.post(f"/api/runs/{b['run_id']}/finish/check", json={"profile": "novice", "text": b["scaffold"]})
+    client.post(f"/api/runs/{b['run_id']}/finish/explain", json={"profile": "novice", "answer": "a"})
+    # ...and run A's summary doesn't claim it.
+    done = client.post(f"/api/runs/{a['run_id']}/finish/complete", json={"profile": "novice", "text": a["scaffold"]}).json()
+    assert done["changes"] == [] and done["rules"] == []
+
+
+SCOPE = {"personal": False, "title": "Paginate the orders query", "language": "sql", "filename": "orders.sql",
+         "commit_message": "Paginate the orders query", "teach_back": "Why keyset over OFFSET?",
+         "concepts": [{"name": "keyset pagination", "description": "Paging by the last seen key"}]}
+
+
+def test_own_task_is_scoped_then_done(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(claude, "scope_task", lambda kind, request, material, known: seen.update(known=known) or SCOPE)
+    monkeypatch.setattr(claude, "run_task", lambda task, context: seen.update(task=task) or
+                        {**RUN, "draft": "SELECT * FROM orders\nWHERE id > :last\nORDER BY id LIMIT 50", "gaps": []})
+    own = {"kind": "code", "request": "Paginate this query without OFFSET", "material": "SELECT * FROM orders",
+           "filename": "../../etc/orders.sql"}
+    run = client.post("/api/run", json={"task_id": "own", "profile": "you", "own": own}).json()
+    assert run["task"]["concepts"] == ["keyset pagination"] and run["task"]["filename"] == "orders.sql"
+    assert seen["task"]["material"] == "SELECT * FROM orders" and seen["known"] == []
+    assert run["plan"][0]["level"] == 0 and run["plan"][0]["track"] != "skill"  # seen once: a one-off so far
+    done = client.post(f"/api/runs/{run['run_id']}/finish/complete", json={"profile": "you", "text": run["scaffold"]}).json()
+    assert done["file"]["name"] == "orders.sql" and done["commit"]["message"].startswith("Paginate the orders query")
+    model = client.get("/api/model/you").json()
+    assert [c["name"] for c in model["concepts"]] == ["keyset pagination"]
+
+
+def test_own_task_needs_live_claude_and_skips_personal_topics(client, monkeypatch):
+    own = {"kind": "writing", "request": "Draft a note to my manager about my sick leave", "material": ""}
+    assert client.post("/api/run", json={"profile": "you", "own": own, "live": False}).status_code == 503
+    monkeypatch.setattr(claude, "scope_task", lambda *a: {**SCOPE, "personal": True, "concepts": []})
+    assert client.post("/api/run", json={"profile": "you", "own": own}).status_code == 422
+    assert client.get("/api/model/you").json()["concepts"] == []
+
+
+def test_you_start_empty_and_can_export(client):
+    assert client.get("/api/model/you").json()["concepts"] == []
+    res = client.get("/api/model/developing/export")
+    assert "attachment" in res.headers["content-disposition"]
+    names = {c["name"] for c in res.json()["concepts"]}
+    assert "retry with exponential backoff" in names

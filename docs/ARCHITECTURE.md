@@ -78,8 +78,9 @@ See the design doc's Technical architecture tab for the production design on GCP
 ## Hosted web demo
 
 A single Cloud Run service at https://claude-learn-717902231295.us-central1.run.app. It reuses the
-pilot's learner engine unchanged; each visitor gets a private sandbox store per learner profile,
-seeded with a synthetic history. Nothing persists beyond the container's lifetime.
+pilot's learner engine; each visitor gets a private sandbox store per learner profile, seeded with a
+synthetic history ("You" starts empty). Visitors can also bring their own task: pasted, uploaded, or
+loaded from a public GitHub file by the browser. Nothing persists beyond the container's lifetime.
 
 ```mermaid
 flowchart LR
@@ -122,11 +123,17 @@ flowchart LR
 
 | Call | When | Output |
 | --- | --- | --- |
+| `scope_task` | Start, own task only | 1-3 concepts (reusing the learner's existing names), title, language, file name, commit message, teach-back question; or "personal", which isn't tracked |
 | `run_task` | Start | Plan-adapted draft with `[[GAP id]]` markers, orientation, prediction question, decisions, takeaway |
 | `review` | Submit | Per-gap verdict (`as_expected`, `different`, `incorrect`, `not_attempted`) and a nudge that never gives the answer |
 | `grade` | Prediction and explain-back answers | `correct`, `partial` or `incorrect`, with feedback |
 | `discuss` | "Talk it through" message | A reply plus a classification: self-explanation, a SOLO-scored question, or critique |
 | `final_check` | "I'm done" | Blocking and minor issues in the final version, and an explain-back question about it |
+
+Run state is a JSON row per run. Slow Claude calls read it first; each change is then applied under a
+per-run lock to a fresh read, so concurrent requests never overwrite each other. Revealed answers
+have their own table. Every piece of evidence carries the run id, so a run's summary counts only
+its own evidence.
 
 The server derives the baseline (Claude's complete version) and the scaffold (with
 `TODO(learner)` markers) from one draft, so what was withheld is always recorded.
@@ -134,11 +141,14 @@ The server derives the baseline (Claude's complete version) and the scaffold (wi
 ### One run
 
 1. **Start:** the learner engine returns the plan for the profile; Claude does the task to that
-   plan. With "Live Claude" off, a recorded live response for the same plan is replayed.
+   plan. With "Live Claude" off, a recorded live response for the same plan is replayed. An own task
+   is scoped first (`scope_task`), and needs live Claude.
 2. **Work:** the learner answers the prediction, fills or reveals gaps, edits freely, and can talk
    it through with Claude (up to 8 messages). Each answer becomes evidence and may fire a rule.
 3. **Submit** (any number of times): Claude reviews the gaps; "who wrote what" classifies every
    line as Claude, Claude edited, or the learner's.
-4. **Finish:** a final check (never blocks), an optional explain-back question, a summary of
-   ownership, level changes and when each concept comes back for review, then the file to copy or
+4. **Finish:** a final check (never blocks) fixes the version: the draft locks until the learner
+   chooses Keep editing. Then an optional explain-back question, graded against the learner's own
+   version. Gaps filled since the last submit are reviewed before the run closes. Then a summary of
+   ownership, level changes and when each concept comes back for review, and the file to copy or
    download next to the commit it would become in Claude Code. The run is then read-only.

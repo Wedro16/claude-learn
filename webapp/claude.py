@@ -161,6 +161,46 @@ FINAL_CHECK_SCHEMA = {
     "additionalProperties": False,
 }
 
+SCOPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "personal": {"type": "boolean"},
+        "title": {"type": "string"},
+        "concepts": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"name": {"type": "string"}, "description": {"type": "string"}},
+                "required": ["name", "description"],
+                "additionalProperties": False,
+            },
+        },
+        "language": {"type": "string"},
+        "filename": {"type": "string"},
+        "commit_message": {"type": "string"},
+        "teach_back": {"type": "string"},
+    },
+    "required": ["personal", "title", "concepts", "language", "filename", "commit_message", "teach_back"],
+    "additionalProperties": False,
+}
+
+SCOPE_POLICY = """\
+A professional has brought their own task. Before anyone does it, name what it teaches.
+
+- concepts: the 1-3 transferable concepts the task really involves, the kind a professional would
+  want to get better at (e.g. "retry with exponential backoff", "claim-evidence structure",
+  "SQL join semantics"). Not the task itself, not incidental details, lowercase, a few words each.
+  Each description is one line. If one of the learner's existing concepts fits, reuse its exact name.
+- personal: true only if the task is about HR matters, health, or personal legal questions.
+  Those are never tracked as learning concepts (return no concepts).
+- title: the task in under 8 words.
+- language: the material's language for a code fence (python, sql, markdown, text, ...).
+- filename: a sensible file name for the finished work.
+- commit_message: a one-line commit message for the finished work, imperative mood.
+- teach_back: one question the learner can answer in a sentence or two, without looking, that
+  shows they understand the most important idea in the finished work.
+"""
+
 GRADE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -184,7 +224,7 @@ def client() -> anthropic.Anthropic:
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise Unavailable("no API key configured")
     if _client is None:
-        _client = anthropic.Anthropic(max_retries=2, timeout=120.0)
+        _client = anthropic.Anthropic(max_retries=2, timeout=240.0)
     return _client
 
 
@@ -220,6 +260,16 @@ def describe_plan(task: dict, context: dict) -> str:
             f"allowed interventions: {', '.join(c['plan']['interventions']) or 'none'}"
         )
     return "\n".join(lines)
+
+
+def scope_task(kind: str, request: str, material: str, known_concepts: list[str]) -> dict:
+    """Name the concepts a visitor's own task involves, plus the details its finish step needs."""
+    user = (
+        f"Task ({kind}): {request}\n\n"
+        f"Material:\n```\n{material or '(none)'}\n```\n\n"
+        f"The learner's existing concepts: {', '.join(known_concepts) or 'none yet'}."
+    )
+    return _call(SCOPE_POLICY, user, SCOPE_SCHEMA, effort="low", max_tokens=4000)
 
 
 def run_task(task: dict, context: dict) -> dict:
