@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claude-learn</title>
+<meta name="description" content="Claude does the work and teaches what it did, adapted to each learner.">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>claude-learn</h1>
+    <p>Claude does the work <em>and</em> makes sure you can own it. How much it teaches depends on what you already know.</p>
+  </div>
+  <div class="controls">
+    <label class="toggle" title="Live calls Claude (about 20-40 s). Instant replay shows a recorded live response.">
+      <input type="checkbox" id="live" checked>
+      <span>Live Claude</span>
+    </label>
+    <a href="/docs" target="_blank" rel="noopener">API</a>
+  </div>
+</header>
+
+<section class="howto" id="howto">
+  <strong>Try it:</strong>
+  <ol>
+    <li>Pick a learner and a task, then <b>Start</b>. Claude does the task, adapted to that learner. Or pick <b>Your own task</b> and bring real work.</li>
+    <li>Answer Claude's question and fill the <code>TODO(learner)</code> gap (or ask for Claude's version), then <b>Submit</b>.</li>
+    <li>Watch the learner model on the right update. Then run the same task as a different learner and compare.</li>
+  </ol>
+  <p class="muted">Sam, Priya and Alex have synthetic histories; <b>You</b> starts empty. Your sandbox is private to this browser.</p>
+  <details class="outside">
+    <summary>Use it outside this page</summary>
+    <ul>
+      <li><b>From code, over HTTP.</b> Every step on this page is an API call, listed at <a href="/docs" target="_blank" rel="noopener">/docs</a>. To run your own work, <code>POST /api/run</code> with an <code>own</code> task.</li>
+      <li><b>In Claude Code, on your machine.</b> The same learner engine runs inside Claude Code on your Claude subscription. It works on your files as you go, and finishing a task is a git commit with attribution. Requires Python 3.10+ and Claude Code.
+        <pre>git clone https://github.com/Wedro16/claude-learn
+cd claude-learn &amp;&amp; scripts/install.sh
+claude</pre>
+        The setup applies to that repository, so do your work inside it. Your learner data stays on your machine, in <code>~/.claude-learn</code>. Details are in the <a href="https://github.com/Wedro16/claude-learn#readme" target="_blank" rel="noopener">README</a>.</li>
+    </ul>
+  </details>
+</section>
+
+<main class="grid">
+  <aside class="pickers">
+    <h2>Learner</h2>
+    <div id="profiles" class="cards"></div>
+    <h2>Task</h2>
+    <div id="tasks" class="cards"></div>
+    <button id="start" class="primary">Start</button>
+    <button id="reset" class="link">Reset this learner's history</button>
+  </aside>
+
+  <section class="workspace" id="workspace">
+    <div class="card hidden own-form" id="own-form">
+      <h3>Your own task</h3>
+      <p class="muted">Claude does the work and teaches it, adapted to what <b id="own-who">you</b> already know. What you add here goes to Claude for this task only, and is kept only in this browser's sandbox on the demo server. The sandbox is deleted 7 days after your first visit, or sooner if the server restarts. Don't paste secrets or confidential material.</p>
+      <label>Kind
+        <select id="own-kind"><option value="code">Code</option><option value="writing">Writing</option></select>
+      </label>
+      <label>What should Claude do?
+        <textarea id="own-request" rows="3" maxlength="2000" placeholder="e.g. Add input validation to this handler and return clear errors for each bad field"></textarea>
+      </label>
+      <label>Your code or notes <span class="muted">(optional; paste, upload, or load a public GitHub file)</span>
+        <textarea id="own-material" class="draft material" rows="10" spellcheck="false"></textarea>
+      </label>
+      <div class="row">
+        <label class="button secondary">Upload a file<input type="file" id="own-file" class="hidden" accept=".py,.js,.ts,.tsx,.jsx,.java,.go,.rb,.rs,.c,.cc,.cpp,.h,.cs,.php,.swift,.kt,.scala,.sql,.sh,.yaml,.yml,.json,.toml,.html,.css,.md,.markdown,.txt,.rst,.adoc,text/*"></label>
+        <input id="own-url" type="url" placeholder="https://github.com/owner/repo/blob/main/path/file.py">
+        <button id="own-load" class="secondary">Load</button>
+      </div>
+      <label>File name <span class="muted">(used for the download and the commit preview)</span>
+        <input id="own-filename" type="text" maxlength="200" placeholder="e.g. handler.py">
+      </label>
+      <p class="muted" id="own-note"></p>
+      <p class="muted">Then press <b>Start</b>. The first time a topic comes up, Claude explains its decisions; once it recurs, you'll get questions and parts to write yourself.</p>
+    </div>
+    <div class="empty" id="empty">
+      <p>Pick a learner and a task, then press <b>Start</b>.</p>
+      <p class="muted">Suggested first run: <b>Priya</b> + <b>Make a flaky API call resilient</b>. Then try <b>Sam</b> and <b>Alex</b> on the same task.</p>
+    </div>
+    <div class="loading hidden" id="loading">
+      <div class="spinner"></div>
+      <p id="loading-text">Claude is doing the task and deciding what to leave for the learner…</p>
+    </div>
+    <div id="result" class="hidden"></div>
+  </section>
+
+  <aside class="model">
+    <h2>Learner model <span class="muted" id="model-who"></span></h2>
+    <div id="events"></div>
+    <div id="concepts"></div>
+    <h3>Success signals</h3>
+    <div id="criteria"></div>
+    <div id="flags"></div>
+    <p class="muted"><a id="export" href="/api/model/developing/export" download>Download everything stored for this learner (JSON)</a></p>
+  </aside>
+</main>
+
+<template id="tpl-result">
+  <div class="source" data-slot="source"></div>
+  <div class="plan" data-slot="plan"></div>
+  <div class="card hidden" data-slot="orientation-card">
+    <h3>Orientation</h3>
+    <div data-slot="orientation" class="prose"></div>
+  </div>
+  <div class="card hidden" data-slot="prediction-card">
+    <h3>Before you look closely: a question</h3>
+    <p data-slot="prediction" class="question"></p>
+    <textarea data-slot="prediction-answer" rows="2" placeholder="Your answer, in a sentence"></textarea>
+    <div class="row">
+      <button data-action="answer" class="primary">Answer</button>
+      <button data-action="skip" class="link">Skip</button>
+    </div>
+    <p data-slot="prediction-feedback" class="feedback hidden"></p>
+  </div>
+  <div class="card">
+    <h3 data-slot="draft-title">Claude's draft</h3>
+    <div data-slot="gaps" class="gaps"></div>
+    <textarea data-slot="draft" class="draft" spellcheck="false"></textarea>
+    <div class="row">
+      <button data-action="submit" class="primary">Submit my version</button>
+      <button data-action="finish" class="secondary">I'm done — use this version</button>
+      <span class="muted" data-slot="submit-note">Edit anything you like; Claude compares your version with the one it would have written.</span>
+    </div>
+  </div>
+  <div class="card hidden finish" data-slot="finish-card">
+    <h3>Finish</h3>
+    <section data-step="check">
+      <h4>1 · Final check</h4>
+      <div data-slot="check"></div>
+      <div class="row">
+        <button data-action="continue" class="primary">Continue</button>
+        <button data-action="keep-editing" class="link">Keep editing</button>
+      </div>
+    </section>
+    <section data-step="explain" class="hidden">
+      <h4>2 · Explain it back <span class="muted">(optional)</span></h4>
+      <p class="question" data-slot="teach-q"></p>
+      <textarea data-slot="teach-a" rows="2" placeholder="In your own words, without looking"></textarea>
+      <div class="row">
+        <button data-action="explain" class="primary">Answer and finish</button>
+        <button data-action="skip-explain" class="link">Skip and finish</button>
+      </div>
+      <p class="feedback hidden" data-slot="teach-fb"></p>
+    </section>
+    <section data-step="summary" class="hidden">
+      <h4>3 · What you did</h4>
+      <div data-slot="summary"></div>
+    </section>
+    <section data-step="take" class="hidden">
+      <h4>4 · Use your work</h4>
+      <div class="row">
+        <button data-action="copy" class="secondary">Copy</button>
+        <button data-action="download" class="secondary" data-slot="download-label">Download</button>
+        <span class="muted" data-slot="copy-note"></span>
+      </div>
+      <h5>What this would look like as a commit</h5>
+      <p class="muted">In Claude Code, finishing is the commit: trailers mark Claude's involvement and a git note records who wrote each line.</p>
+      <pre data-slot="commit" class="commit"></pre>
+      <div class="row">
+        <button data-action="other-learner" class="primary">Try this task as another learner</button>
+        <button data-action="new-task" class="link">Start another task</button>
+      </div>
+    </section>
+  </div>
+  <div class="card" data-slot="discuss-card">
+    <h3>Talk it through with Claude</h3>
+    <p class="muted">Explain why you changed something, ask why Claude did it its way, or push back on its version. Claude sees your current draft. Good explanations count toward the learner model.</p>
+    <div data-slot="chat" class="chat"></div>
+    <textarea data-slot="chat-input" rows="2"></textarea>
+    <div class="row">
+      <button data-action="send" class="primary">Send</button>
+      <span class="muted">⌘/Ctrl + Enter to send</span>
+    </div>
+  </div>
+  <div class="card hidden" data-slot="review-card">
+    <h3>Review</h3>
+    <div data-slot="review"></div>
+    <h4>Who wrote what</h4>
+    <p class="legend"><span class="claude">Claude</span> <span class="claude_modified">Claude, edited by you</span> <span class="human">You</span> <span data-slot="share" class="muted"></span></p>
+    <pre data-slot="ownership" class="ownership"></pre>
+  </div>
+  <div class="card notes">
+    <h3>Decisions in this draft</h3>
+    <ul data-slot="decisions"></ul>
+    <p data-slot="critique" class="critique hidden"></p>
+    <p data-slot="takeaway" class="takeaway"></p>
+  </div>
+</template>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "orientation": "",
+  "decision_notes": [
+    "Structured the section as one subsection per decision, each stating the choice and then the reason, so a reviewer can scan it and challenge any single decision on its own.",
+    "I rejected a flat bullet list that mirrors the notes. Bullets would keep the facts but lose the 'because' that makes this rationale rather than a changelog.",
+    "The Redis subsection ends with an explicit 'Revisit if' trigger. That turns a future concern into a condition a reviewer can check.",
+    "Worth checking before merging: I inferred two things the notes don't state. One is that multiple instances would cause duplicate upstream calls and inconsistent data. The other is that clients use the stale flag to decide how to display old forecasts. Confirm both with the team."
+  ],
+  "prediction_prompt": "An entry for a city is cached at 13:58 and upstream publishes a new forecast at 14:00. What is the latest time a user could still see the old forecast? And what would they see if upstream is down when that entry expires?",
+  "draft": "## Design decisions\n\n### Why a cache\nThe forecast API was receiving ~40 requests/min, almost all for the same 12 cities. Caching responses removes nearly all of that repeated upstream traffic.\n\n### TTL: 10 minutes\nUpstream forecasts change only hourly, so a longer TTL would usually be safe. We chose 10 minutes so that users see a new forecast within at most 10 minutes of an upstream update, while most requests are still served from cache.\n\n### In-process LRU, not Redis\n[[GAP gap-1]]\nWe use an in-process LRU cache capped at 256 entries rather than Redis. We run a single instance, so a shared cache gives us nothing today, and Redis would be one more service to deploy, monitor, and keep available. 256 entries comfortably covers our 12 cities with room to grow.\n\n**Revisit if:** we scale past one instance. Each instance would then keep its own cache, multiplying upstream calls and potentially serving different data per instance. At that point a shared cache like Redis is worth its operational cost.\n[[/GAP]]\n\n### Serving stale data on upstream errors\nIf the upstream API fails and we hold an expired entry for that city, we return it marked as stale instead of returning an error. A slightly old forecast is more useful to users than none, and the stale flag lets clients decide how to present it.",
+  "gaps": [
+    {
+      "gap_id": "gap-1",
+      "concept": "writing design rationale",
+      "description": "Write the 'In-process LRU, not Redis' subsection. State the choice and the rejected alternative, give the reasons tied to our current situation, and add a 'Revisit if' line naming the condition that would flip the decision and why.",
+      "hint": "A reviewer's first question will be 'why not the obvious alternative?' Answer it with facts about today's deployment. Then ask yourself what specifically breaks, or gets worse, if those facts change."
+    }
+  ],
+  "critique_invitation": "",
+  "takeaway": "Good design rationale pairs each choice with the constraint that justifies it and the condition under which you'd change it, so reviewers can check the reasoning rather than just the result.",
+  "_plan": [
+    "gap",
+    "prediction",
+    "retrieval"
+  ]
+}

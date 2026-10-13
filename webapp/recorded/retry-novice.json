@@ -1,0 +1,20 @@
+{
+  "orientation": "Retrying with exponential backoff means waiting longer after each failure (for example 0.5s, 1s, 2s, 4s), so a struggling service gets time to recover. Jitter randomizes each wait so many clients don't retry at the same moment. You stop after a fixed number of attempts, and you never retry an error that will fail every time.\n\n- **Transient error:** a failure that may succeed on retry, such as a dropped connection.\n- **Permanent error:** a failure that will repeat every time, such as bad input like an empty city.\n- **Exponential backoff:** the wait doubles after each failed attempt, up to a cap.\n- **Jitter:** randomness added to the wait. 'Full jitter' picks a value between 0 and the backoff.\n- **Max attempts:** the retry budget. After it is used up, the last error is re-raised.",
+  "decision_notes": [
+    "Only `ConnectionError` and `TimeoutError` are retried. `ValueError` (missing city) is never caught, so it fails immediately, because retrying bad input only wastes time. I rejected `except Exception`: it would retry real bugs and hide them.",
+    "5 attempts with base 0.5s and full jitter. At a 50% failure rate, 5 attempts fail together only (0.5)^5 \u2248 3% of the time. Worst-case total waiting is under 7.5s (0.5+1+2+4). Treat the 50% figure as an assumption: if real failures come in outages lasting minutes, short retries won't help and you'd want a longer cap or a circuit breaker instead.",
+    "Full jitter (`uniform(0, backoff)`) instead of 'backoff \u00b1 small noise'. It spreads retries out the most, which matters when many callers fail at once.",
+    "`sleep` and `rng` can be passed in (they default to `time.sleep` and `random`). Tests can then run instantly and deterministically, still with no dependencies."
+  ],
+  "prediction_prompt": "",
+  "draft": "```python\nimport random\nimport time\n\n# Errors that might succeed if we try again. Anything else (e.g. ValueError\n# for a missing city) is permanent and propagates immediately.\nRETRYABLE_ERRORS = (ConnectionError, TimeoutError)\n\n\ndef fetch_forecast(\n    api,\n    city,\n    max_attempts=5,\n    base_delay=0.5,\n    max_delay=8.0,\n    sleep=time.sleep,\n    rng=random,\n):\n    \"\"\"Fetch a forecast, retrying transient failures with exponential backoff + full jitter.\n\n    Raises the last transient error if all attempts fail, or any permanent\n    error immediately.\n    \"\"\"\n    if max_attempts < 1:\n        raise ValueError(\"max_attempts must be at least 1\")\n\n    for attempt in range(1, max_attempts + 1):\n        try:\n            return api.get(city)\n        except RETRYABLE_ERRORS:\n            if attempt == max_attempts:\n                raise  # out of budget: surface the real error\n            backoff = min(max_delay, base_delay * 2 ** (attempt - 1))\n            sleep(rng.uniform(0, backoff))  # full jitter\n\n\n# --- Worked example -------------------------------------------------------\nif __name__ == \"__main__\":\n    delays = []\n    api = FlakyForecastAPI(failure_rate=0.5, seed=1)\n    result = fetch_forecast(api, \"Oslo\", sleep=delays.append, rng=random.Random(0))\n    print(result)\n    print(\"waited:\", [round(d, 2) for d in delays])\n    # Attempt 1 fails -> wait up to 0.5s; attempt 2 fails -> up to 1s; ...\n    # Each wait's ceiling doubles, but the actual wait is random below it.\n\n    try:\n        fetch_forecast(api, \"\", sleep=delays.append)\n    except ValueError as e:\n        print(\"not retried:\", e)  # permanent error, zero waiting\n```",
+  "gaps": [],
+  "critique_invitation": "",
+  "takeaway": "Retry only what can change on a second try, wait exponentially longer with randomness between tries, and cap the attempts so failure stays fast and visible.",
+  "_plan": [
+    "decision_explanation",
+    "orientation",
+    "takeaway",
+    "worked_example"
+  ]
+}

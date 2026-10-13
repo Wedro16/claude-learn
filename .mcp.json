@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "learner": {
+      "command": "scripts/learner-mcp.sh",
+      "args": []
+    }
+  }
+}
