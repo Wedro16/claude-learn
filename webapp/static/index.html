@@ -90,6 +90,16 @@
       <span class="muted" data-slot="submit-note">Edit anything you like; Claude compares your version with the one it would have written.</span>
     </div>
   </div>
+  <div class="card" data-slot="discuss-card">
+    <h3>Talk it through with Claude</h3>
+    <p class="muted">Explain why you changed something, ask why Claude did it its way, or push back on its version. Claude sees your current draft. Good explanations count toward the learner model.</p>
+    <div data-slot="chat" class="chat"></div>
+    <textarea data-slot="chat-input" rows="2"></textarea>
+    <div class="row">
+      <button data-action="send" class="primary">Send</button>
+      <span class="muted">⌘/Ctrl + Enter to send</span>
+    </div>
+  </div>
   <div class="card hidden" data-slot="review-card">
     <h3>Review</h3>
     <div data-slot="review"></div>

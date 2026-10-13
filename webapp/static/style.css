@@ -149,3 +149,13 @@ textarea.draft.wrap { white-space: pre-wrap; font-family: inherit; font-size: 15
 .criteria { display: grid; grid-template-columns: 1fr auto; gap: 4px 8px; font-size: 13px; }
 .criteria span:nth-child(even) { font-weight: 600; text-align: right; }
 .flag { background: var(--warn-soft); border-radius: 8px; padding: 8px 10px; font-size: 13px; margin-top: 10px; }
+
+.chat { display: grid; gap: 8px; margin-bottom: 10px; }
+.chat:empty { display: none; }
+.msg { padding: 8px 12px; border-radius: 10px; max-width: 85%; font-size: 14px; }
+.msg p { margin: 0 0 6px; }
+.msg p:last-of-type { margin-bottom: 0; }
+.msg.you { background: var(--accent-soft); justify-self: end; white-space: pre-wrap; }
+.msg.claude { background: var(--code); justify-self: start; }
+.msg.pending { color: var(--muted); font-style: italic; }
+.msg .tag { font-size: 12px; color: var(--muted); margin-top: 6px; }

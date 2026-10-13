@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from learner import report
 from learner.db import connect
-from learner.store import LearnerStore
+from learner.store import REVIEWED, LearnerStore
 from webapp import claude, content, drafts
 
 DATA_DIR = Path(os.environ.get("DEMO_DATA_DIR", "/tmp/claude-learn-demo"))
@@ -38,6 +38,7 @@ GLOBAL_PER_DAY = int(os.environ.get("DEMO_CALLS_PER_DAY", "800"))
 # Proxies that append to X-Forwarded-For in front of the app (Cloud Run's front end appends 1).
 TRUSTED_PROXY_HOPS = int(os.environ.get("DEMO_TRUSTED_PROXY_HOPS", "0"))
 COOKIE = "claude_learn_visitor"
+MAX_DISCUSSION_MESSAGES = 8  # learner messages per run
 
 RUNS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS demo_runs (
@@ -204,6 +205,13 @@ class AnswerRequest(BaseModel):
 class SubmitRequest(BaseModel):
     profile: str
     text: str = Field(max_length=40000)
+    live: bool = True
+
+
+class DiscussRequest(BaseModel):
+    profile: str
+    message: str = Field(min_length=1, max_length=2000)
+    text: str = Field(max_length=40000, description="The learner's current version of the draft")
     live: bool = True
 
 
@@ -392,6 +400,52 @@ def submit(run_id: str, body: SubmitRequest, request: Request, response: Respons
         if e := event(store.record_evidence(primary, "substantive_fix", True, ref=run_id), "caught an issue in Claude's draft"):
             events.append(e)
     return {**reviewed, "source": source, "ownership": owned, "events": events, "model": snapshot(store)}
+
+
+@app.post("/api/runs/{run_id}/discuss")
+def discuss(run_id: str, body: DiscussRequest, request: Request, response: Response):
+    """Talk an edit through with Claude: explain your reasoning, ask why, or push back.
+
+    Claude replies, and classifies the message: a correct explanation is
+    self-explanation evidence, a question is scored on the SOLO scale, and valid
+    pushback is critique evidence.
+    """
+    store = learner(visitor(request, response), body.profile)
+    run_state = load_run(store, run_id)
+    task = content.TASKS[run_state["task_id"]]
+    history = run_state.setdefault("discussion", [])
+    if sum(t["role"] == "user" for t in history) >= MAX_DISCUSSION_MESSAGES:
+        raise HTTPException(400, "This conversation is long enough for one run. Start the task again to keep going.")
+    open_gaps = [
+        {"gap_id": g["gap_id"], "description": g["description"]}
+        for g in run_state["gaps"] if store.get_baseline(g["item_id"])["status"] not in REVIEWED
+    ]
+    try:
+        out = live(request, body.live, claude.discuss, task, run_state["baseline"], body.text,
+                   open_gaps, history, body.message)
+    except claude.Unavailable:
+        return {"reply": "Claude can't respond offline. Turn on Live Claude to talk this through.",
+                "source": "offline", "events": [], "model": snapshot(store)}
+
+    concept = out["concept"] if out["concept"] in task["concepts"] else task["concepts"][0]
+    previous = next((t["content"] for t in reversed(history) if t["role"] == "assistant"),
+                    "Explain the reasoning behind your edits.")
+    result, label = None, None
+    if out["kind"] == "explanation" and out["understanding"] != "not_applicable":
+        result = store.record_intervention(concept, "self_explanation", previous, out["understanding"],
+                                           response=body.message, session_id=run_id)
+        label = f"explanation: {out['understanding']}"
+    elif out["kind"] == "question" and out["solo"]:
+        result = store.record_evidence(concept, "question", detail=str(out["solo"]), ref=run_id)
+        label = f"question, SOLO level {out['solo']}"
+    elif out["kind"] == "pushback":
+        result = store.record_evidence(concept, "critique", out["pushback_valid"], ref=run_id)
+        label = "pushback: Claude agreed" if out["pushback_valid"] else "pushback: Claude explained the trade-off"
+
+    history += [{"role": "user", "content": body.message}, {"role": "assistant", "content": out["reply"]}]
+    save_run(store, run_id, run_state)
+    events = [e for e in [event(result, label)] if e] if label else []
+    return {**out, "concept": concept, "source": "live", "events": events, "model": snapshot(store)}
 
 
 @app.post("/api/runs/{run_id}/reveal")

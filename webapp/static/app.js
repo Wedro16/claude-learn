@@ -230,6 +230,13 @@ function renderRun(run) {
   }
   slot("takeaway").replaceChildren("Takeaway: ", mdInline(run.takeaway));
 
+  slot("chat-input").placeholder = writing
+    ? "e.g. I led with the Redis trade-off because a reviewer will ask about it first…"
+    : "e.g. I capped the delay because without a cap, attempt 10 would wait over 4 minutes…";
+  slot("chat-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) send();
+  });
+  $('[data-action="send"]', result).addEventListener("click", send);
   $('[data-action="answer"]', result).addEventListener("click", answer);
   $('[data-action="skip"]', result).addEventListener("click", skip);
   $('[data-action="submit"]', result).addEventListener("click", submit);
@@ -261,6 +268,44 @@ async function skip() {
   if (!current(runId)) return;
   slot("prediction-card").classList.add("hidden");
   applyUpdate(data);
+}
+
+const RECORDED_AS = {
+  explanation: (d) => `your explanation (${d.understanding})`,
+  question: (d) => `a question (SOLO level ${d.solo})`,
+  pushback: (d) => (d.pushback_valid ? "pushback Claude agreed with" : "pushback (Claude explained the trade-off)"),
+};
+
+async function send() {
+  const input = slot("chat-input");
+  const message = input.value.trim();
+  if (!message) return;
+  const runId = state.run.run_id;
+  const chat = slot("chat");
+  const button = $('[data-action="send"]', $("#result"));
+  input.value = "";
+  button.disabled = true;
+  chat.append(el("div", { class: "msg you" }, message));
+  const pending = el("div", { class: "msg claude pending" }, live() ? "Claude is reading your draft…" : "…");
+  chat.append(pending);
+  try {
+    const data = await api(`/api/runs/${runId}/discuss`, {
+      profile: state.profile, message, text: slot("draft").value, live: live(),
+    });
+    if (!current(runId)) return;
+    const recorded = RECORDED_AS[data.kind]?.(data);
+    pending.className = "msg claude";
+    pending.replaceChildren(...md(data.reply),
+      recorded ? el("div", { class: "tag" }, `Recorded ${recorded} · ${data.concept}`) : null);
+    applyUpdate(data);
+  } catch (err) {
+    if (!current(runId)) return;
+    pending.className = "msg claude";
+    pending.replaceChildren(el("p", {}, err.message));
+    input.value = message;
+  } finally {
+    button.disabled = false;
+  }
 }
 
 async function reveal(gapId) {

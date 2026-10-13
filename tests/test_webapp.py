@@ -244,3 +244,62 @@ def test_index_versions_its_assets(client):
     res = client.get("/")
     assert res.headers["cache-control"] == "no-cache"
     assert f"/static/app.js?v={webapp_app.STATIC_VERSION}" in res.text
+
+
+def _discuss_reply(**kw):
+    out = {"reply": "Right: the cap bounds the wait.", "kind": "explanation", "understanding": "correct",
+           "concept": "retry with exponential backoff", "solo": 0, "pushback_valid": False}
+    return {**out, **kw}
+
+
+def test_discussion_turns_reasoning_into_evidence(client, monkeypatch):
+    seen = {}
+
+    def fake(task, baseline, text, open_gaps, history, message):
+        seen.update(open_gaps=open_gaps, history=list(history), text=text)
+        return _discuss_reply()
+
+    monkeypatch.setattr(claude, "discuss", fake)
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    body = {"profile": "developing", "message": "I capped it so attempt 10 doesn't wait minutes", "text": "my draft"}
+    data = client.post(f"/api/runs/{run['run_id']}/discuss", json=body).json()
+    assert data["source"] == "live" and data["reply"].startswith("Right")
+    assert seen["open_gaps"] == [{"gap_id": "gap-1", "description": "Compute the delay and sleep."}]
+    assert seen["text"] == "my draft"
+    evidence = [e for e in client.get("/api/model/developing").json()["concepts"]
+                if e["name"] == "retry with exponential backoff"][0]["evidence"]
+    assert evidence == 7  # one self-explanation added to the seeded six
+
+    # The conversation continues with its history.
+    client.post(f"/api/runs/{run['run_id']}/discuss", json={**body, "message": "and the jitter?"})
+    assert [t["role"] for t in seen["history"]] == ["user", "assistant"]
+
+
+def test_discussion_records_questions_and_pushback(client, monkeypatch):
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "proficient"}).json()
+    url = f"/api/runs/{run['run_id']}/discuss"
+    body = {"profile": "proficient", "message": "m", "text": "t"}
+    monkeypatch.setattr(claude, "discuss", lambda *a: _discuss_reply(kind="question", understanding="not_applicable", solo=4))
+    assert client.post(url, json=body).json()["events"][0]["label"] == "question, SOLO level 4"
+    monkeypatch.setattr(claude, "discuss", lambda *a: _discuss_reply(kind="pushback", understanding="not_applicable", pushback_valid=True))
+    assert client.post(url, json=body).json()["events"][0]["label"] == "pushback: Claude agreed"
+
+
+def test_revealed_gaps_are_not_hidden_from_the_discussion(client, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(claude, "discuss", lambda task, b, t, open_gaps, h, m: seen.update(g=open_gaps) or _discuss_reply())
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    client.post(f"/api/runs/{run['run_id']}/reveal", json={"profile": "developing", "gap_id": "gap-1"})
+    client.post(f"/api/runs/{run['run_id']}/discuss", json={"profile": "developing", "message": "why?", "text": "t"})
+    assert seen["g"] == []
+
+
+def test_discussion_offline_and_length_limit(client, monkeypatch):
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    url = f"/api/runs/{run['run_id']}/discuss"
+    offline = client.post(url, json={"profile": "developing", "message": "m", "text": "t", "live": False}).json()
+    assert offline["source"] == "offline" and offline["events"] == []
+    monkeypatch.setattr(claude, "discuss", lambda *a: _discuss_reply(kind="other", understanding="not_applicable"))
+    for _ in range(webapp_app.MAX_DISCUSSION_MESSAGES):
+        assert client.post(url, json={"profile": "developing", "message": "m", "text": "t"}).status_code == 200
+    assert client.post(url, json={"profile": "developing", "message": "m", "text": "t"}).status_code == 400

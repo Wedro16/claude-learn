@@ -101,6 +101,44 @@ REVIEW_SCHEMA = {
     "additionalProperties": False,
 }
 
+DISCUSS_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "reply": {"type": "string"},
+        "kind": {"type": "string", "enum": ["explanation", "question", "pushback", "other"]},
+        "understanding": {"type": "string", "enum": ["correct", "partial", "incorrect", "not_applicable"]},
+        "concept": {"type": "string"},
+        "solo": {"type": "integer", "enum": [0, 1, 2, 3, 4]},
+        "pushback_valid": {"type": "boolean"},
+    },
+    "required": ["reply", "kind", "understanding", "concept", "solo", "pushback_valid"],
+    "additionalProperties": False,
+}
+
+DISCUSS_POLICY = """\
+You are talking through a learner's edits with them, like a thoughtful senior colleague. They may
+explain the reasoning behind a change, ask why something works, or push back on your version.
+
+Reply in 2-4 sentences, specific to their code or text:
+- Reasoning right: say so and why it matters. Partly right: name exactly what's missing.
+  Wrong: correct it gently with the key idea.
+- Pushback: if they're right, concede plainly and say what that changes; if not, explain the
+  trade-off without being defensive.
+- Question: answer it directly.
+- End with one follow-up question only when it would deepen their understanding.
+- Never give away the answer to an open gap (listed below). Nudge instead.
+
+Then classify THEIR latest message:
+- kind: explanation (their reasoning for something they did), question, pushback (arguing a
+  choice in your draft is wrong or worse), or other.
+- understanding: for an explanation, whether the reasoning is correct, partial or incorrect;
+  otherwise not_applicable.
+- concept: the one listed concept the message is mostly about.
+- solo: for a question, its SOLO level (1 single fact, 2 several facts, 3 how things relate,
+  4 applying to a new case); otherwise 0.
+- pushback_valid: true only if their pushback identifies a real improvement or flaw.
+"""
+
 GRADE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -128,13 +166,15 @@ def client() -> anthropic.Anthropic:
     return _client
 
 
-def _call(system: str, user: str, schema: dict, effort: str, max_tokens: int) -> dict:
+def _call(system: str, user: str | list[dict], schema: dict, effort: str, max_tokens: int) -> dict:
+    """One structured-output request; user is a message or a full message history."""
+    messages = [{"role": "user", "content": user}] if isinstance(user, str) else user
     try:
         response = client().beta.messages.create(
             model=MODEL,
             max_tokens=max_tokens,
             system=system,
-            messages=[{"role": "user", "content": user}],
+            messages=messages,
             output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
             # On a safety decline, the API reruns the request on a fallback model.
             betas=["server-side-fallback-2026-07-01"],
@@ -203,6 +243,19 @@ def grade(task: dict, question: str, answer: str, baseline: str) -> dict:
     )
     user = f"Solution:\n```\n{baseline}\n```\n\nQuestion: {question}\n\nLearner's answer: {answer}"
     return _call(system, user, GRADE_SCHEMA, effort="low", max_tokens=4000)
+
+
+def discuss(task: dict, baseline: str, learner_text: str, open_gaps: list[dict], history: list[dict], message: str) -> dict:
+    """Respond to the learner explaining, questioning or pushing back on their edits."""
+    system = (
+        f"{DISCUSS_POLICY}\nTask: {task['request']}\nConcepts: {', '.join(task['concepts'])}\n\n"
+        f"Your complete version:\n```\n{baseline}\n```\n\n"
+        f"Open gaps (don't reveal their answers): {json.dumps(open_gaps) if open_gaps else 'none'}"
+    )
+    # The learner's current version rides with every message, so the reply sees their latest edits.
+    turns = [{"role": t["role"], "content": t["content"]} for t in history]
+    turns.append({"role": "user", "content": f"My current version:\n```\n{learner_text}\n```\n\n{message}"})
+    return _call(system, turns, DISCUSS_SCHEMA, effort="low", max_tokens=4000)
 
 
 # -- offline paths -----------------------------------------------------------

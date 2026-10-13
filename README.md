@@ -22,6 +22,9 @@ Bundled content, so reviewers need nothing of their own:
 - Two tasks: make a flaky API call resilient (code) and explain a design decision to a reviewer (writing).
 - "Live Claude" calls Claude Opus 5.5 (about 20-40 s). Unchecked, it replays a recorded live
   response instantly. Over the rate limit, it falls back to recordings automatically.
+- "Talk it through with Claude": explain the reasoning behind an edit, ask why, or push back on
+  Claude's version. Claude replies and classifies the message: a correct explanation counts as
+  self-explanation, a question is scored on the SOLO scale, and valid pushback counts as critique.
 - API docs at `/docs`.
 
 Run locally:
