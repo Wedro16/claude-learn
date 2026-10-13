@@ -23,8 +23,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from learner import report
-from learner.db import connect
-from learner.store import REVIEWED, LearnerStore
+from learner.attribution import _ranges
+from learner.db import connect, now, parse
+from learner.store import REVIEW_AFTER, REVIEWED, LearnerStore
 from webapp import claude, content, drafts
 
 DATA_DIR = Path(os.environ.get("DEMO_DATA_DIR", "/tmp/claude-learn-demo"))
@@ -152,11 +153,14 @@ def learner(vid: str, profile: str) -> LearnerStore:
     return store
 
 
-def load_run(store: LearnerStore, run_id: str) -> dict:
+def load_run(store: LearnerStore, run_id: str, open_only: bool = True) -> dict:
     row = store.conn.execute("SELECT payload FROM demo_runs WHERE id = ?", (run_id,)).fetchone()
     if row is None:
         raise HTTPException(404, "Unknown run; start the task again.")
-    return json.loads(row["payload"])
+    run_state = json.loads(row["payload"])
+    if open_only and run_state.get("finished"):
+        raise HTTPException(409, "This run is finished. Start the task again to keep working.")
+    return run_state
 
 
 def save_run(store: LearnerStore, run_id: str, run: dict) -> None:
@@ -273,6 +277,11 @@ def run(body: RunRequest, request: Request, response: Response):
         store.record_concept(name, context_id=run_id)
     context = store.context(task["concepts"], session_id=run_id)
     allowed = {k for c in context["concepts"] for k in c["plan"]["interventions"]}
+    started_at = now()
+    levels_at_start = {
+        r["name"]: r["level"] for r in store.conn.execute(
+            "SELECT c.name, s.level FROM concepts c JOIN concept_state s ON s.concept_id = c.id")
+    }
 
     try:
         out, source, note = live(request, body.live, claude.run_task, task, context), "live", ""
@@ -325,7 +334,8 @@ def run(body: RunRequest, request: Request, response: Response):
         "critique_invitation": out["critique_invitation"], "takeaway": out["takeaway"],
         "scaffold": scaffold, "gaps": gaps,
     }
-    save_run(store, run_id, {**run_state, "baseline": baseline, "spans": spans})
+    save_run(store, run_id, {**run_state, "baseline": baseline, "spans": spans,
+                             "started_at": started_at, "levels_at_start": levels_at_start})
     return {"run_id": run_id, **run_state, "model": snapshot(store)}
 
 
@@ -446,6 +456,111 @@ def discuss(run_id: str, body: DiscussRequest, request: Request, response: Respo
     save_run(store, run_id, run_state)
     events = [e for e in [event(result, label)] if e] if label else []
     return {**out, "concept": concept, "source": "live", "events": events, "model": snapshot(store)}
+
+
+class FinishCheckRequest(BaseModel):
+    profile: str
+    text: str = Field(max_length=40000, description="The learner's final version")
+    live: bool = True
+
+
+class CompleteRequest(BaseModel):
+    profile: str
+    text: str = Field(max_length=40000)
+
+
+@app.post("/api/runs/{run_id}/finish/check")
+def finish_check(run_id: str, body: FinishCheckRequest, request: Request, response: Response):
+    """Finish step 1: a final, non-blocking review of the version the learner will use."""
+    store = learner(visitor(request, response), body.profile)
+    run_state = load_run(store, run_id)
+    task = content.TASKS[run_state["task_id"]]
+    try:
+        out, source = live(request, body.live, claude.final_check, task, run_state["baseline"], body.text), "live"
+    except claude.Unavailable:
+        out, source = claude.heuristic_final_check(task, body.text), "offline"
+    run_state["final"] = {"check": out}
+    save_run(store, run_id, run_state)
+    return {**out, "source": source}
+
+
+@app.post("/api/runs/{run_id}/finish/explain")
+def finish_explain(run_id: str, body: AnswerRequest, request: Request, response: Response):
+    """Finish step 2: explain it back. Graded retrieval practice; optional."""
+    store = learner(visitor(request, response), body.profile)
+    run_state = load_run(store, run_id)
+    task = content.TASKS[run_state["task_id"]]
+    question = run_state.get("final", {}).get("check", {}).get("teach_back_question") or task["teach_back"]
+    try:
+        graded, source = live(request, body.live, claude.grade, task, question, body.answer, run_state["baseline"]), "live"
+    except claude.Unavailable:
+        graded, source = claude.heuristic_grade(), "offline"
+    result = store.record_intervention(task["concepts"][0], "retrieval", question, graded["outcome"],
+                                       response=body.answer, session_id=run_id)
+    run_state.setdefault("final", {}).update(explained=True, teach_back=graded["outcome"])
+    save_run(store, run_id, run_state)
+    events = [e for e in [event(result, f"explained it back: {graded['outcome']}")] if e]
+    return {**graded, "question": question, "source": source, "events": events, "model": snapshot(store)}
+
+
+@app.post("/api/runs/{run_id}/finish/complete")
+def finish_complete(run_id: str, body: CompleteRequest, request: Request, response: Response):
+    """Finish steps 3 and 4: close the run; summarize it; hand over the file and its commit."""
+    store = learner(visitor(request, response), body.profile)
+    run_state = load_run(store, run_id)
+    task = content.TASKS[run_state["task_id"]]
+    final = run_state.setdefault("final", {})
+    if not final.get("explained"):
+        question = final.get("check", {}).get("teach_back_question") or task["teach_back"]
+        store.record_intervention(task["concepts"][0], "retrieval", question, "skipped", session_id=run_id)
+
+    # What you built: who wrote what in the final version.
+    reference = "\n".join([run_state["scaffold"], *run_state.get("revealed", {}).values()])
+    owned = drafts.ownership(reference, body.text)
+    by_class: dict[str, list[int]] = {}
+    for number, line in enumerate(owned["lines"], start=1):
+        if line["cls"] != "blank":
+            by_class.setdefault(line["cls"], []).append(number)
+    note = {"session": run_id, "files": {task["filename"]: {k: _ranges(v) for k, v in by_class.items()}}}
+    trailers = "\n\nAssisted-by: Claude\nClaude-Session: " + run_id if by_class.get("claude") or by_class.get("claude_modified") else ""
+
+    # What changed in your model during this run.
+    started = run_state.get("started_at", now())
+    levels_now = {r["name"]: r["level"] for r in store.conn.execute(
+        "SELECT c.name, s.level FROM concepts c JOIN concept_state s ON s.concept_id = c.id")}
+    before = run_state.get("levels_at_start", {})
+    changes = [{"concept": name, "from": before.get(name, 0), "to": level}
+               for name, level in levels_now.items() if level != before.get(name, 0)]
+    rules = [dict(r) for r in store.conn.execute(
+        "SELECT c.name AS concept, o.rule_id, o.from_level, o.to_level FROM rule_observations o"
+        " JOIN concepts c ON c.id = o.concept_id"
+        " WHERE o.passed = 1 AND o.from_level != o.to_level AND o.at >= ? ORDER BY o.id", (started,))]
+    observations = store.conn.execute("SELECT COUNT(*) FROM evidence WHERE at >= ?", (started,)).fetchone()[0]
+
+    # What's next: when each concept comes back, and what Claude will do then.
+    upcoming = []
+    for c in store.context(task["concepts"], session_id=None)["concepts"]:
+        due = None
+        if c["track"] == "skill" and c["level"] > 0 and c["last_evidence_at"]:
+            due = (parse(c["last_evidence_at"]) + REVIEW_AFTER[c["level"]]).date().isoformat()
+        upcoming.append({"concept": c["name"], "level": c["level"], "level_name": c["level_name"],
+                         "track": c["track"], "review_on": due, "next_plan": c["plan"]["interventions"]})
+
+    final.update(text=body.text)
+    run_state["finished"] = True
+    save_run(store, run_id, run_state)
+    return {
+        "check": final.get("check"),
+        "ownership": owned,
+        "changes": changes,
+        "rules": rules,
+        "observations": observations,
+        "teach_back": final.get("teach_back"),
+        "upcoming": upcoming,
+        "file": {"name": task["filename"], "content": body.text},
+        "commit": {"message": task["commit_message"] + trailers, "note": note},
+        "model": snapshot(store),
+    }
 
 
 @app.post("/api/runs/{run_id}/reveal")

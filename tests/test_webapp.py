@@ -41,6 +41,7 @@ RUN = {
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     monkeypatch.setattr(webapp_app, "DATA_DIR", tmp_path / "demo")
+    monkeypatch.setattr(webapp_app, "limiter", webapp_app.Limiter())  # each test starts under the live-call cap
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     monkeypatch.setattr(claude, "run_task", lambda task, context: {**RUN, "gaps": [dict(g) for g in RUN["gaps"]]})
     monkeypatch.setattr(claude, "grade", lambda *a: {"outcome": "correct", "feedback": "Yes: it stays bounded."})
@@ -303,3 +304,59 @@ def test_discussion_offline_and_length_limit(client, monkeypatch):
     for _ in range(webapp_app.MAX_DISCUSSION_MESSAGES):
         assert client.post(url, json={"profile": "developing", "message": "m", "text": "t"}).status_code == 200
     assert client.post(url, json={"profile": "developing", "message": "m", "text": "t"}).status_code == 400
+
+
+def _finish_stubs(monkeypatch, outcome="correct"):
+    monkeypatch.setattr(claude, "final_check", lambda *a: {
+        "ready": True, "issues": [], "teach_back_question": "What happens when the service is down for good?"})
+    monkeypatch.setattr(claude, "grade", lambda *a: {"outcome": outcome, "feedback": "Yes."})
+
+
+def test_finishing_summarizes_and_hands_over_the_work(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "novice"}).json()
+    url = f"/api/runs/{run['run_id']}/finish"
+    final = run["scaffold"] + "\n# my note about the cap"
+    check = client.post(f"{url}/check", json={"profile": "novice", "text": final}).json()
+    assert check["ready"] and check["source"] == "live"
+
+    explained = client.post(f"{url}/explain", json={"profile": "novice", "answer": "It stops after 5 tries and re-raises"}).json()
+    assert explained["outcome"] == "correct"
+    assert explained["events"][0]["from"] == 0 and explained["events"][0]["to"] == 1
+
+    done = client.post(f"{url}/complete", json={"profile": "novice", "text": final}).json()
+    assert done["file"] == {"name": "forecast.py", "content": final}
+    assert {"concept": "retry with exponential backoff", "from": 0, "to": 1} in done["changes"]
+    assert "Assisted-by: Claude" in done["commit"]["message"]
+    files = done["commit"]["note"]["files"]["forecast.py"]
+    assert files["human"] == [[len(final.splitlines()), len(final.splitlines())]]
+    retry = next(u for u in done["upcoming"] if u["concept"] == "retry with exponential backoff")
+    assert retry["review_on"] and retry["next_plan"][0] == "prediction"  # level 1 now: questions, not a worked example
+
+
+def test_skipping_the_explanation_is_logged_not_counted(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "novice"}).json()
+    url = f"/api/runs/{run['run_id']}/finish"
+    client.post(f"{url}/check", json={"profile": "novice", "text": run["scaffold"]})
+    done = client.post(f"{url}/complete", json={"profile": "novice", "text": run["scaffold"]}).json()
+    assert done["changes"] == []
+    assert done["ownership"]["learner_share"] == 0.0
+
+
+def test_a_finished_run_is_read_only(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    url = f"/api/runs/{run['run_id']}"
+    client.post(f"{url}/finish/complete", json={"profile": "developing", "text": run["scaffold"]})
+    for path, body in [("submit", {"text": "x"}), ("reveal", {"gap_id": "gap-1"}),
+                       ("discuss", {"message": "m", "text": "t"}), ("finish/complete", {"text": "x"})]:
+        assert client.post(f"{url}/{path}", json={"profile": "developing", **body}).status_code == 409
+
+
+def test_offline_final_check_flags_unfinished_gaps(client):
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    check = client.post(f"/api/runs/{run['run_id']}/finish/check",
+                        json={"profile": "developing", "text": run["scaffold"], "live": False}).json()
+    assert not check["ready"] and check["issues"][0]["severity"] == "blocking"
+    assert check["teach_back_question"]

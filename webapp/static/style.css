@@ -159,3 +159,14 @@ textarea.draft.wrap { white-space: pre-wrap; font-family: inherit; font-size: 15
 .msg.claude { background: var(--code); justify-self: start; }
 .msg.pending { color: var(--muted); font-style: italic; }
 .msg .tag { font-size: 12px; color: var(--muted); margin-top: 6px; }
+
+button.secondary {
+  background: var(--panel); color: var(--ink); border: 1px solid var(--line); border-radius: 8px;
+  padding: 8px 14px; font: inherit; cursor: pointer;
+}
+button.secondary:hover { border-color: var(--accent); }
+.finish { border-color: var(--accent); }
+.finish section { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 10px; }
+.finish section:first-of-type { border-top: 0; margin-top: 0; padding-top: 0; }
+h5 { font-size: 13px; margin: 12px 0 4px; }
+.commit { background: var(--code); border-radius: 8px; padding: 10px; overflow: auto; max-height: 280px; font-size: 12px; margin: 6px 0 0; }

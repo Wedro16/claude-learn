@@ -139,6 +139,28 @@ Then classify THEIR latest message:
 - pushback_valid: true only if their pushback identifies a real improvement or flaw.
 """
 
+FINAL_CHECK_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ready": {"type": "boolean"},
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "severity": {"type": "string", "enum": ["blocking", "minor"]},
+                    "description": {"type": "string"},
+                },
+                "required": ["severity", "description"],
+                "additionalProperties": False,
+            },
+        },
+        "teach_back_question": {"type": "string"},
+    },
+    "required": ["ready", "issues", "teach_back_question"],
+    "additionalProperties": False,
+}
+
 GRADE_SCHEMA = {
     "type": "object",
     "properties": {
@@ -234,6 +256,24 @@ def review(task: dict, baseline: str, scaffold: str, learner_text: str, gaps: li
     return _call(system, user, REVIEW_SCHEMA, effort="medium", max_tokens=8000)
 
 
+def final_check(task: dict, baseline: str, learner_text: str) -> dict:
+    """Read the learner's final version against the task before they use it."""
+    system = (
+        "The learner is about to use their final version. Check it against the task the way a "
+        "good reviewer would. Report only real problems: blocking (it would fail, or doesn't do what "
+        "the task asks) or minor (worth fixing; at most two). No style nitpicks, and say nothing "
+        "about choices that differ from the reference but work. ready is true when nothing is "
+        "blocking. Each description: one or two specific sentences pointing at the line or passage. "
+        "Then write one teach-back question: ask the learner to explain, in a sentence or two and "
+        "without looking, the most important idea in their final version."
+    )
+    user = (
+        f"Task: {task['request']}\n\nReference version (for comparison only):\n```\n{baseline}\n```\n\n"
+        f"Learner's final version:\n```\n{learner_text}\n```"
+    )
+    return _call(system, user, FINAL_CHECK_SCHEMA, effort="medium", max_tokens=6000)
+
+
 def grade(task: dict, question: str, answer: str, baseline: str) -> dict:
     """Grade a learner's answer to a prediction or what-if question."""
     system = (
@@ -302,6 +342,17 @@ def heuristic_review(baseline_spans: dict[str, str], learner_text: str, gaps: li
             feedback = "Differs from the baseline, so it can't be checked offline. Turn on Live Claude to have it reviewed."
         out.append({"gap_id": g["gap_id"], "verdict": verdict, "feedback": feedback})
     return {"gaps": out, "other_changes": "", "caught_issue": False}
+
+
+def heuristic_final_check(task: dict, learner_text: str) -> dict:
+    """Offline: the only thing we can check for sure is unfinished TODO markers."""
+    from webapp.drafts import unfilled
+
+    issues = [{"severity": "blocking", "description": f"{gap_id} still has its TODO(learner) marker."}
+              for gap_id in sorted(unfilled(learner_text))]
+    issues.append({"severity": "minor", "description": "Offline check only: turn on Live Claude for a real review."})
+    return {"ready": not any(i["severity"] == "blocking" for i in issues), "issues": issues,
+            "teach_back_question": task["teach_back"]}
 
 
 def heuristic_grade() -> dict:

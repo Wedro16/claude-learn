@@ -22,6 +22,9 @@ TASKS = {
         "kind": "code",
         "language": "python",
         "concepts": [RETRY, ERRORS],
+        "filename": "forecast.py",
+        "commit_message": "Retry flaky forecast calls with exponential backoff",
+        "teach_back": "In a sentence or two: how does your version behave if the forecast service is down for good?",
         "request": (
             "fetch_forecast() fails about half the time because the forecast service is flaky. "
             "Make it retry with exponential backoff and jitter, give up after a sensible number of "
@@ -56,6 +59,9 @@ def fetch_forecast(api, city):
         "kind": "writing",
         "language": "markdown",
         "concepts": [RATIONALE],
+        "filename": "design-decisions.md",
+        "commit_message": "Document the forecast cache design decisions",
+        "teach_back": "In a sentence or two: why does each decision in your section name the alternative it rejected?",
         "request": (
             "Draft the 'Design decisions' section of the README for the forecast cache, for a "
             "teammate reviewing the pull request. Use the notes below; keep it under 250 words."

@@ -87,8 +87,49 @@
     <textarea data-slot="draft" class="draft" spellcheck="false"></textarea>
     <div class="row">
       <button data-action="submit" class="primary">Submit my version</button>
+      <button data-action="finish" class="secondary">I'm done — use this version</button>
       <span class="muted" data-slot="submit-note">Edit anything you like; Claude compares your version with the one it would have written.</span>
     </div>
+  </div>
+  <div class="card hidden finish" data-slot="finish-card">
+    <h3>Finish</h3>
+    <section data-step="check">
+      <h4>1 · Final check</h4>
+      <div data-slot="check"></div>
+      <div class="row">
+        <button data-action="continue" class="primary">Continue</button>
+        <button data-action="keep-editing" class="link">Keep editing</button>
+      </div>
+    </section>
+    <section data-step="explain" class="hidden">
+      <h4>2 · Explain it back <span class="muted">(optional)</span></h4>
+      <p class="question" data-slot="teach-q"></p>
+      <textarea data-slot="teach-a" rows="2" placeholder="In your own words, without looking"></textarea>
+      <div class="row">
+        <button data-action="explain" class="primary">Answer and finish</button>
+        <button data-action="skip-explain" class="link">Skip and finish</button>
+      </div>
+      <p class="feedback hidden" data-slot="teach-fb"></p>
+    </section>
+    <section data-step="summary" class="hidden">
+      <h4>3 · What you did</h4>
+      <div data-slot="summary"></div>
+    </section>
+    <section data-step="take" class="hidden">
+      <h4>4 · Use your work</h4>
+      <div class="row">
+        <button data-action="copy" class="secondary">Copy</button>
+        <button data-action="download" class="secondary" data-slot="download-label">Download</button>
+        <span class="muted" data-slot="copy-note"></span>
+      </div>
+      <h5>What this would look like as a commit</h5>
+      <p class="muted">In Claude Code, finishing is the commit: trailers mark Claude's involvement and a git note records who wrote each line.</p>
+      <pre data-slot="commit" class="commit"></pre>
+      <div class="row">
+        <button data-action="other-learner" class="primary">Try this task as another learner</button>
+        <button data-action="new-task" class="link">Start another task</button>
+      </div>
+    </section>
   </div>
   <div class="card" data-slot="discuss-card">
     <h3>Talk it through with Claude</h3>

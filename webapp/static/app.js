@@ -90,6 +90,7 @@ async function loadModel() {
 // Runs belong to one learner's sandbox; switching or resetting the learner ends the run.
 function clearRun() {
   state.run = null;
+  state.final = null;
   state.runSeq += 1;
   $("#result").classList.add("hidden");
   $("#result").replaceChildren();
@@ -240,6 +241,19 @@ function renderRun(run) {
   $('[data-action="answer"]', result).addEventListener("click", answer);
   $('[data-action="skip"]', result).addEventListener("click", skip);
   $('[data-action="submit"]', result).addEventListener("click", submit);
+  $('[data-action="finish"]', result).addEventListener("click", finishCheck);
+  $('[data-action="keep-editing"]', result).addEventListener("click", () => slot("finish-card").classList.add("hidden"));
+  $('[data-action="continue"]', result).addEventListener("click", () => {
+    $('[data-step="explain"]', result).classList.remove("hidden");
+    $('[data-action="continue"]', result).parentElement.classList.add("hidden");
+    slot("teach-a").focus();
+  });
+  $('[data-action="explain"]', result).addEventListener("click", explainBack);
+  $('[data-action="skip-explain"]', result).addEventListener("click", () => complete());
+  $('[data-action="copy"]', result).addEventListener("click", copyWork);
+  $('[data-action="download"]', result).addEventListener("click", downloadWork);
+  $('[data-action="other-learner"]', result).addEventListener("click", () => { clearRun(); window.scrollTo({ top: 0, behavior: "smooth" }); });
+  $('[data-action="new-task"]', result).addEventListener("click", () => { clearRun(); window.scrollTo({ top: 0, behavior: "smooth" }); });
 }
 
 async function answer() {
@@ -343,6 +357,143 @@ async function submit() {
   } finally {
     done();
   }
+}
+
+// -- finishing -----------------------------------------------------------------
+
+async function finishCheck() {
+  const runId = state.run.run_id;
+  const text = slot("draft").value;
+  const done = withTimer(live() ? "Claude is giving your version a final read…" : "Checking…");
+  try {
+    const data = await api(`/api/runs/${runId}/finish/check`, { profile: state.profile, text, live: live() });
+    if (!current(runId)) return;
+    state.final = { text, check: data };
+    const card = slot("finish-card");
+    card.classList.remove("hidden");
+    $('[data-step="explain"]', card).classList.add("hidden");
+    $('[data-action="continue"]', card).parentElement.classList.remove("hidden");
+    const blocking = data.issues.filter((i) => i.severity === "blocking");
+    slot("check").replaceChildren(
+      el("p", {}, el("span", { class: `badge ${data.ready ? "as_expected" : "incorrect"}` }, data.ready ? "ready to use" : "has a problem"), " ",
+        data.ready ? "Nothing blocking." : "You can fix it first, or finish anyway: the work is yours to ship."),
+      ...(data.issues.length ? [el("ul", {}, data.issues.map((i) => el("li", {}, el("b", {}, `${i.severity}: `), mdInline(i.description))))] : []),
+    );
+    $('[data-action="continue"]', card).textContent = blocking.length ? "Finish anyway" : "Continue";
+    slot("teach-q").replaceChildren(mdInline(data.teach_back_question));
+    card.scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    done();
+  }
+}
+
+async function explainBack() {
+  const answer = slot("teach-a").value.trim();
+  if (!answer) return;
+  const runId = state.run.run_id;
+  const done = withTimer(live() ? "Claude is reading your explanation…" : "Recording…");
+  try {
+    const data = await api(`/api/runs/${runId}/finish/explain`, { profile: state.profile, answer, live: live() });
+    if (!current(runId)) return;
+    const fb = slot("teach-fb");
+    fb.classList.remove("hidden");
+    fb.replaceChildren(el("span", { class: `badge ${data.outcome === "correct" ? "as_expected" : data.outcome === "partial" ? "different" : "incorrect"}` }, data.outcome), " ", mdInline(data.feedback));
+    applyUpdate(data);
+  } catch (err) {
+    alert(err.message);
+    return;
+  } finally {
+    done();
+  }
+  await complete();
+}
+
+function summarize(data) {
+  const parts = [];
+  const share = Math.round(data.ownership.learner_share * 100);
+  parts.push(el("h5", {}, "What you built"),
+    el("p", {}, `${share}% of the lines in your final version are yours or edited by you.`),
+    el("p", { class: "legend" }, el("span", { class: "claude" }, "Claude"), el("span", { class: "claude_modified" }, "Claude, edited by you"), el("span", { class: "human" }, "You")),
+    el("pre", { class: `ownership${state.catalog.tasks.find((t) => t.id === state.run.task_id).kind === "writing" ? " wrap" : ""}` },
+      data.ownership.lines.map((l) => el("span", { class: l.cls }, l.text || " "))));
+  parts.push(el("h5", {}, "What changed in your learner model"));
+  parts.push(data.changes.length
+    ? el("ul", {}, data.changes.map((c) => el("li", {}, `${c.concept}: level ${c.from} → ${c.to} (${LEVELS[c.to]})`)))
+    : el("p", {}, `No level changes this time, which is normal for a single session. ${data.observations} piece${data.observations === 1 ? "" : "s"} of evidence recorded.`));
+  const TEACH_BACK = {
+    correct: "Your explanation at the end was right, and it counts as evidence of understanding.",
+    partial: "Your explanation at the end was partly right. It's logged, but only a fully correct explanation moves a level, so Claude will come back to the missing piece.",
+    incorrect: "Your explanation at the end missed the key idea. Claude will revisit it next time.",
+  };
+  parts.push(el("p", {}, TEACH_BACK[data.teach_back] || "You skipped explaining it back. That's fine; it's logged, not counted against you."));
+  if (data.rules.length) {
+    parts.push(el("p", { class: "muted" }, "Rules that fired: ", ...data.rules.map((r) => el("code", {}, `${r.rule_id} `))));
+  }
+  parts.push(el("h5", {}, "What's next"), el("ul", {}, data.upcoming.map((u) => el("li", {},
+    el("b", {}, u.concept), ` · level ${u.level} (${u.level_name}). `,
+    u.track === "skill"
+      ? (u.review_on ? `Review due ${u.review_on}. ` : "Review scheduled once you've shown some understanding. ")
+      : "One-off topic: no review scheduled unless it comes up again. ",
+    `Next time Claude will lead with: ${u.next_plan.join(", ").replaceAll("_", " ") || "no interventions"}.`))));
+  return parts;
+}
+
+async function complete() {
+  const runId = state.run.run_id;
+  const done = withTimer("Wrapping up…");
+  try {
+    const data = await api(`/api/runs/${runId}/finish/complete`, { profile: state.profile, text: state.final.text });
+    if (!current(runId)) return;
+    state.final.result = data;
+    const card = slot("finish-card");
+    for (const step of ["summary", "take"]) $(`[data-step="${step}"]`, card).classList.remove("hidden");
+    $('[data-action="explain"]', card).parentElement.classList.add("hidden");
+    slot("summary").replaceChildren(...summarize(data));
+    slot("download-label").textContent = `Download ${data.file.name}`;
+    const note = JSON.stringify(data.commit.note, null, 2).replace(/\[\s+(\d+),\s+(\d+)\s+\]/g, "[$1, $2]");
+    slot("commit").textContent = `${data.commit.message}\n\n# git notes --ref=claude-attribution\n${note}`;
+    lockRun();
+    renderModel(data.model);
+    $('[data-step="summary"]', card).scrollIntoView({ behavior: "smooth", block: "start" });
+  } catch (err) {
+    alert(err.message);
+  } finally {
+    done();
+  }
+}
+
+// A finished run is read-only: the summary and the file are what remain.
+function lockRun() {
+  const result = $("#result");
+  slot("draft").readOnly = true;
+  for (const action of ["submit", "finish", "send", "answer", "skip", "continue", "keep-editing"]) {
+    $(`[data-action="${action}"]`, result)?.classList.add("hidden");
+  }
+  slot("chat-input").classList.add("hidden");
+  slot("discuss-card").classList.toggle("hidden", !slot("chat").children.length);
+  result.querySelectorAll(".gap button").forEach((b) => b.remove());
+  slot("submit-note").textContent = "Finished. This run is read-only.";
+}
+
+async function copyWork() {
+  try {
+    await navigator.clipboard.writeText(state.final.result.file.content);
+    slot("copy-note").textContent = "Copied.";
+  } catch {
+    slot("copy-note").textContent = "Couldn't copy; use Download instead.";
+  }
+}
+
+function downloadWork() {
+  const { name, content } = state.final.result.file;
+  const url = URL.createObjectURL(new Blob([content], { type: "text/plain" }));
+  const link = el("a", { href: url, download: name });
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function reset() {

@@ -25,6 +25,10 @@ Bundled content, so reviewers need nothing of their own:
 - "Talk it through with Claude": explain the reasoning behind an edit, ask why, or push back on
   Claude's version. Claude replies and classifies the message: a correct explanation counts as
   self-explanation, a question is scored on the SOLO scale, and valid pushback counts as critique.
+- "I'm done — use this version" closes a run in four steps: a final check by Claude (it never
+  blocks), an optional explain-it-back question, a summary of what you built and what changed in
+  your learner model (with when each concept comes back for review), and the file to copy or
+  download, shown alongside the commit it would become in Claude Code.
 - API docs at `/docs`.
 
 Run locally:
