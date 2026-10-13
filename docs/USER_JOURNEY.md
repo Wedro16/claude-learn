@@ -41,11 +41,44 @@ What "sized to your level" means, per concept:
 | 1-2 · explain, predict | A prediction question, one or two meaningful gaps, a retrieval or "what if" question |
 | 3-4 · modify, critique | Asks for your plan or offers alternatives; invites critique of its output |
 
+## Why each step helps learning
+
+Every step applies at least one of five learning mechanisms. The research behind them, with
+verified sources, is in the design doc's
+[Problem summary and research tab](https://claude.ai/code/artifact/5472a59b-895f-4bab-b99c-82b8cd220207).
+For example: a week after studying, people who were tested recalled 56% of a passage against
+42% for those who reread it (Roediger and Karpicke, 2006), and AI help that does the thinking
+lowered exam scores once the AI was removed (Bastani et al., 2025).
+
+| Stage | Mechanism | Why it helps |
+| --- | --- | --- |
+| Session start | Spacing, retrieval | A due concept comes back for one short question after a gap, which strengthens memory more than rereading |
+| Ask | Calibration, prior knowledge | The plan is set per concept from what the person already knows, and new concepts attach to ones they have |
+| Work | Worked examples and fading, cognitive load, generation | Novices see a worked solution; others predict first or fill a gap. At most three interventions keep the load down |
+| Make it yours | Generation, self-explanation, feedback | Writing the gap and explaining an edit is the effortful part; Claude's reply is specific feedback on it |
+| Finish | Retrieval, metacognition | Explaining it back without looking tests what stuck, and corrects the fluency illusion of having read a clear answer |
+| Next session | Feedback, transfer | Gaps are compared with Claude's version, and work done without Claude is the evidence that the skill transferred |
+| Over the weeks | Spacing, fading, desirable difficulty | Reviews space out as levels rise; support is withdrawn as the person takes on more |
+
+Where each mechanism shows up:
+
+| Mechanism | Session start | Ask | Work | Make it yours | Finish | Next session | Weeks |
+| --- | :-: | :-: | :-: | :-: | :-: | :-: | :-: |
+| Generation (retrieval, generation effect, self-explanation) | ● | | ● | ● | ● | | ● |
+| Calibration (cognitive load, worked examples and fading, expertise reversal) | | ● | ● | | | | ● |
+| Consolidation (spacing, recurrence across tasks) | ● | ● | | | | ● | ● |
+| Metacognition (feedback, the fluency illusion) | | | | ● | ● | ● | |
+| Motivation (autonomy, competence, prior knowledge) | | ● | | ● | ● | | |
+
+**Not built yet.** Two consolidation mechanisms from the research have no feature yet:
+interleaving (mixing related concepts in one review) and varied contexts (the same principle in
+a different setting). Both are natural extensions of spaced reviews.
+
 ## Over the following weeks
 
-- **Spaced reviews.** A skill-track concept comes back for a short review after 2, 7, 21 or 45 days
+- **Spaced reviews (the spacing effect).** A skill-track concept comes back for a short review after 2, 7, 21 or 45 days
   at levels 1, 2, 3 and 4. Claude weaves one into a task when it fits, never as a quiz on its own.
-- **Fading.** As levels rise, worked examples give way to gaps, then to critique. Claude does
+- **Fading (worked-example fading, expertise reversal).** As levels rise, worked examples give way to gaps, then to critique. Claude does
   less of the thinking for you.
 - **Decay.** A concept with no evidence for 60 days drops one level, so support comes back.
 - **Success signals** (`python -m learner.report`): you do tasks on a concept without Claude, you
