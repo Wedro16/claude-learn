@@ -11,7 +11,7 @@ flowchart LR
     start --> ask["Ask for work<br/><i>Claude names 1-3 concepts and<br/>reads the plan for each</i>"]
     ask --> work["Claude does the work<br/><i>adapted to your level</i>"]
     work --> own["Make it yours<br/><i>fill gaps, edit, talk it through</i>"]
-    own --> finish["Finish<br/><i>commit: trailers + line attribution</i>"]
+    own --> finish["Finish<br/><i>final check · explain it back ·<br/>commit · summary</i>"]
     finish --> next["Next session<br/><i>commit tagged, gaps reviewed,<br/>levels updated</i>"]
     next --> ask
     next -.->|over weeks| weeks["Spaced reviews · promotion ·<br/>fading · decay"]
@@ -27,7 +27,7 @@ flowchart LR
 | Ask | Describe the task. Say "just do it" to skip learning for this request | Names the 1-3 transferable concepts and reads each one's plan: dial, track, level, allowed interventions | An occurrence per concept; two in 30 days moves a concept from one-off to skill track |
 | Work | Read, answer at most one question | Always delivers working output, with at most three interventions sized to your level (table below). States its assumptions and rejected alternatives so you have something to push on | The interventions shown; a baseline of its complete version whenever it withholds a part |
 | Make it yours | Fill `TODO(learner)` gaps or ask for the answer, edit freely, explain your reasoning, push back | Answers, nudges without giving away open gaps, concedes when you're right | Your answers and questions as evidence: explanations, question depth (SOLO), critique, real errors you catch. Asking for an answer is fine and recorded as "handed back"; reference lookups never count against you |
-| Finish | Commit | The git hooks do the rest | `Assisted-by: Claude` and `Claude-Session` trailers; a note under `refs/notes/claude-attribution` classifying each added line as Claude's, Claude's edited by you, or yours |
+| Finish | Say you're done, or ask Claude to commit | A final check of your version (never blocks); one optional explain-it-back question about your version; the commit; then a short summary: your share of the lines, what changed in your learner model and why, and when each concept comes back | Your explain-back answer (or that you skipped it); `Assisted-by: Claude` and `Claude-Session` trailers; a note under `refs/notes/claude-attribution` classifying each added line as Claude's, Claude's edited by you, or yours |
 | Next session | Nothing | Tags the commit's concepts; reviews your completed gaps against its baseline and tells you briefly how your version compares | Gap verdicts, and the commit's ownership: all-yours commits are the strongest evidence, unchanged Claude commits a warning sign |
 
 What "sized to your level" means, per concept:
@@ -84,11 +84,12 @@ The demo compresses the journey into one page, with no install:
 
 | | Claude Code pilot | Hosted demo |
 | --- | --- | --- |
-| Finishing | The commit. No final check or explain-back yet | Final check, explain-back, summary, download |
+| Finishing | Final check, explain-back, commit, summary (in conversation) | Final check, explain-back, summary, download with a commit preview |
 | Evidence from your repository | Commits tagged next session; work without Claude counts as unassisted use | None. Each run stands alone; no commits |
 | Spaced reviews | Woven into later tasks when due | Shown as dates in the summary only |
 | Data | Local SQLite file, yours to keep | Per-browser sandbox, deleted after 7 days; export as JSON |
 | Claude | Claude Code on your subscription | Claude API (Opus 5.5), rate-limited; recorded replays when offline |
 
-A natural next step for the pilot is adding the demo's final check and explain-back to the
-learning policy, so finishing in Claude Code teaches as much as finishing in the demo.
+Both finish the same way, from the same policy: the four steps are in `CLAUDE.md` for Claude
+Code and built into the demo's page, and both summaries come from the learner engine's
+`session_summary`, so they count the same evidence.

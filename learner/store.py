@@ -321,6 +321,12 @@ class LearnerStore:
         d["level_name"] = mastery.LEVEL_NAMES[d["level"]]
         return d
 
+    def _review_on(self, state: dict) -> str | None:
+        """The date a skill-track concept comes back for review, if it has one yet."""
+        if state["track"] != "skill" or state["level"] == 0 or not state["last_evidence_at"]:
+            return None
+        return (parse(state["last_evidence_at"]) + REVIEW_AFTER[state["level"]]).date().isoformat()
+
     def _review_due(self, state: dict, at: str) -> bool:
         if state["track"] != "skill" or state["level"] == 0 or not state["last_evidence_at"]:
             return False
@@ -356,9 +362,38 @@ class LearnerStore:
                 continue
             state = self._state(cid)
             state["review_due"] = self._review_due(state, at)
+            state["review_on"] = self._review_on(state)
             state["plan"] = self.plan(state, session_dial)
             out["concepts"].append(state)
         return out
+
+    def session_summary(self, session_id: str | None = None) -> dict:
+        """What a session did to the learner model, for the summary when a task is finished.
+
+        Counts only evidence recorded for this session, so other sessions never show up here.
+        """
+        session_id = session_id or current_session_id()
+        rules = [dict(r) for r in self.conn.execute(
+            "SELECT c.name AS concept, o.rule_id, o.from_level, o.to_level FROM rule_observations o"
+            " JOIN evidence e ON e.id = o.evidence_id JOIN concepts c ON c.id = o.concept_id"
+            " WHERE e.ref = ? AND o.passed = 1 AND o.from_level != o.to_level ORDER BY o.id", (session_id,))]
+        first_last: dict[str, list[int]] = {}
+        for r in rules:
+            first_last.setdefault(r["concept"], [r["from_level"], r["to_level"]])[1] = r["to_level"]
+        names = [r[0] for r in self.conn.execute(
+            "SELECT c.name FROM occurrences o JOIN concepts c ON c.id = o.concept_id"
+            " WHERE o.context_id = ? ORDER BY c.name", (session_id,))]
+        upcoming = []
+        for c in self.context(names, session_id=None)["concepts"]:
+            upcoming.append({"concept": c["name"], "level": c["level"], "level_name": c["level_name"],
+                             "track": c["track"], "review_on": c["review_on"], "next_plan": c["plan"]["interventions"]})
+        return {
+            "session_id": session_id,
+            "changes": [{"concept": c, "from": a, "to": b} for c, (a, b) in first_last.items() if a != b],
+            "rules": rules,
+            "observations": self.conn.execute("SELECT COUNT(*) FROM evidence WHERE ref = ?", (session_id,)).fetchone()[0],
+            "upcoming": upcoming,
+        }
 
     def summary(self, repo: str | None = None) -> dict:
         """What Claude needs at the start of a session.

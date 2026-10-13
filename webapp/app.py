@@ -27,8 +27,8 @@ from pydantic import BaseModel, Field
 
 from learner import report
 from learner.attribution import _ranges
-from learner.db import connect, now, parse
-from learner.store import REVIEW_AFTER, REVIEWED, LearnerStore
+from learner.db import connect, now
+from learner.store import REVIEWED, LearnerStore
 from webapp import claude, content, drafts
 
 DATA_DIR = Path(os.environ.get("DEMO_DATA_DIR", "/tmp/claude-learn-demo"))
@@ -735,35 +735,16 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
     note = {"session": run_id, "files": {task["filename"]: {k: _ranges(v) for k, v in by_class.items()}}}
     trailers = "\n\nAssisted-by: Claude\nClaude-Session: " + run_id if by_class.get("claude") or by_class.get("claude_modified") else ""
 
-    # What changed in your model because of this run: only evidence recorded for this run counts,
-    # so work in another tab never shows up here.
-    rules = [dict(r) for r in store.conn.execute(
-        "SELECT c.name AS concept, o.rule_id, o.from_level, o.to_level FROM rule_observations o"
-        " JOIN evidence e ON e.id = o.evidence_id JOIN concepts c ON c.id = o.concept_id"
-        " WHERE e.ref = ? AND o.passed = 1 AND o.from_level != o.to_level ORDER BY o.id", (run_id,))]
-    first_last: dict[str, list[int]] = {}
-    for r in rules:
-        first_last.setdefault(r["concept"], [r["from_level"], r["to_level"]])[1] = r["to_level"]
-    changes = [{"concept": c, "from": a, "to": b} for c, (a, b) in first_last.items() if a != b]
-    observations = store.conn.execute("SELECT COUNT(*) FROM evidence WHERE ref = ?", (run_id,)).fetchone()[0]
-
-    # What's next: when each concept comes back, and what Claude will do then.
-    upcoming = []
-    for c in store.context(task["concepts"], session_id=None)["concepts"]:
-        due = None
-        if c["track"] == "skill" and c["level"] > 0 and c["last_evidence_at"]:
-            due = (parse(c["last_evidence_at"]) + REVIEW_AFTER[c["level"]]).date().isoformat()
-        upcoming.append({"concept": c["name"], "level": c["level"], "level_name": c["level_name"],
-                         "track": c["track"], "review_on": due, "next_plan": c["plan"]["interventions"]})
-
+    # What changed in your model because of this run (only its own evidence), and what comes next.
+    session = store.session_summary(run_id)
     return {
         "check": final.get("check"),
         "ownership": owned,
-        "changes": changes,
-        "rules": rules,
-        "observations": observations,
+        "changes": session["changes"],
+        "rules": session["rules"],
+        "observations": session["observations"],
         "teach_back": final.get("teach_back"),
-        "upcoming": upcoming,
+        "upcoming": session["upcoming"],
         "file": {"name": task["filename"], "content": text},
         "commit": {"message": task["commit_message"] + trailers, "note": note},
         "model": snapshot(store),

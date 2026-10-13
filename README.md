@@ -78,6 +78,9 @@ Work as usual. Claude follows the learning policy in [CLAUDE.md](CLAUDE.md):
 - It records the concepts each task involves and adapts how much it teaches to your level.
 - Sometimes it leaves a gap marked `TODO(learner) <id>` with a hint. Fill it in, or ask for the
   answer; either is fine.
+- When you say you're done, Claude gives your version a final check (it never blocks), asks one
+  optional explain-it-back question, commits if you ask, and summarizes what changed in your
+  learner model and when each topic comes back.
 - Commits containing Claude-written lines get `Assisted-by: Claude` and `Claude-Session` trailers,
   plus a line-attribution note under `refs/notes/claude-attribution`.
 

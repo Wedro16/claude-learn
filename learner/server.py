@@ -56,6 +56,16 @@ def get_learner_context(concepts: list[str]) -> dict:
 
 
 @tool
+def get_session_summary() -> dict:
+    """What this session changed: level changes and the rules behind them, evidence recorded, and for
+    each concept the session touched, its level, its next review date and what you'll lead with next time.
+
+    Use it for the summary when the person finishes a task.
+    """
+    return store().session_summary()
+
+
+@tool
 def get_learner_summary() -> dict:
     """Skill tracks, due reviews, commits to tag, withheld items to review, and non-learning flags."""
     s = store()

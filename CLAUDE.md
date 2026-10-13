@@ -26,7 +26,7 @@ together. Learning is on by default. These rules apply to every task in this rep
    | Situation | What to do |
    | --- | --- |
    | dial `off` | Full output. No interventions. Still record concepts. |
-   | one-off topic | Explain the key decisions and give one takeaway. No questions. |
+   | one-off topic | Explain the key decisions and give one takeaway. No questions (except the optional explain-back when finishing). |
    | level 0 | Short orientation (core mental model, 3-5 key terms), a fully worked solution with the reasoning behind each decision, one takeaway. Do not quiz. |
    | levels 1-2 | One prediction prompt before or during the work; leave one or two meaningful gaps; one retrieval or "what if" question after. |
    | levels 3-4 | Ask for their plan or offer alternatives to choose from; invite critique of your output. |
@@ -51,6 +51,32 @@ together. Learning is on by default. These rules apply to every task in this rep
    - asking you to re-explain your own earlier output on the same concept: `re_explain_request`
    - pushback or critique that improved the result: `critique` with `passed: true`
    - them catching a real error in your output: `substantive_fix`
+
+## Finishing a task
+
+When the person says they're done, asks you to commit, or is about to use the work, finish in four
+short steps. None of them blocks: if they want to skip ahead, skip ahead.
+
+1. **Final check.** Re-read the final version (theirs, with their edits) against the task. Report
+   only real problems: blocking (it would fail, or doesn't do what was asked) and at most two minor
+   ones, each pointing at the line or passage. Say nothing about choices that differ from yours but
+   work. If something is blocking, offer the fix and let them decide; they can always finish anyway.
+2. **Explain it back (optional).** Unless the dial is `off`, ask one question about the most
+   important idea in *their* final version, to answer in a sentence or two without looking. Say it's
+   optional. This is the one question allowed even on one-off topics. Grade the answer against their
+   version, not yours (a valid change of approach is not a wrong answer), tell them in a sentence,
+   and call `record_intervention` with kind `retrieval` and `correct`, `partial` or `incorrect`; if
+   they skip it, record `skipped`. It counts toward the three interventions per task.
+3. **Commit** if they asked you to: a one-line message in the imperative mood. The git hooks add the
+   `Assisted-by` / `Claude-Session` trailers and the line-attribution note.
+4. **Summary**, in a few lines:
+   - who wrote what: after a commit, `git notes --ref=claude-attribution show HEAD` gives the
+     line ranges; give their share of the lines (their own plus the ones they edited)
+   - what changed in their learner model and why: `get_session_summary` (level changes with the
+     rules that fired; "no change" is normal for one session)
+   - what's next: for each concept, its next review date (`review_on`) and what you'll lead with
+     next time
+   - where the work is: the commit, or the file path
 
 ## Session start
 

@@ -30,7 +30,7 @@ flowchart LR
     repo[("GitHub repository<br/><i>commits + trailers<br/>refs/notes/claude-attribution</i>")]
 
     person <-->|tasks, answers| claude
-    claude <-->|12 MCP tools| mcp
+    claude <-->|13 MCP tools| mcp
     hooks -->|session summary in| claude
     hooks -->|lines Claude wrote| db
     mcp <--> db
@@ -63,11 +63,14 @@ flowchart LR
 3. When Claude withholds part of the work, it stores the full draft with `record_baseline` and
    leaves `TODO(learner) <item_id>` markers.
 4. **PostToolUse hook** records every line Claude writes.
-5. On commit, **prepare-commit-msg** adds `Assisted-by` / `Claude-Session` trailers when the commit
+5. When the person finishes, Claude runs a final check, offers one explain-it-back question,
+   commits if asked, and summarizes from `get_session_summary`: level changes with the rules that
+   fired, and each concept's next review date.
+6. On commit, **prepare-commit-msg** adds `Assisted-by` / `Claude-Session` trailers when the commit
    contains lines Claude wrote in this repository in the last 7 days. **post-commit** classifies each
    added line of the finished commit as `claude`, `claude_modified` or `human` (amends included),
    writes the attribution note, and records the commit. Merge commits are skipped.
-6. In the next session, Claude tags the commit's concepts and reviews completed gaps against the
+7. In the next session, Claude tags the commit's concepts and reviews completed gaps against the
    baseline. Those become evidence, and the mastery rules update levels.
 
 ### What the pilot defers

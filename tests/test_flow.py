@@ -167,3 +167,21 @@ def test_report_counts_only_successful_observations(store):
     c = report.build(store.conn)["criteria"]
     assert c["A_unassisted"]["unassisted_use_evidence"] == 0
     assert c["D_critical_engagement"]["substantive_fixes"] == 0
+
+
+def test_session_summary_reports_only_this_sessions_changes(store):
+    store.record_concept(NAME, context_id="s1")
+    store.record_concept(NAME, context_id="s0")  # seen before: a skill track
+    # The finish step's explain-back, answered correctly in this session.
+    store.record_intervention(NAME, "retrieval", "What happens when it's down for good?", "correct",
+                              response="it gives up after five tries", session_id="s1")
+    # Evidence from another session never shows up here.
+    store.record_evidence(NAME, "self_explanation", True, ref="s2")
+
+    summary = store.session_summary("s1")
+    assert summary["changes"] == [{"concept": NAME, "from": 0, "to": 1}]
+    assert [r["rule_id"] for r in summary["rules"]] == ["L1.reach"]
+    assert summary["observations"] == 1
+    (upcoming,) = summary["upcoming"]
+    assert upcoming["track"] == "skill" and upcoming["review_on"]
+    assert store.context([NAME])["concepts"][0]["review_on"] == upcoming["review_on"]
