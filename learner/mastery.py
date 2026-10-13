@@ -207,7 +207,7 @@ def non_learning_flags(conn: sqlite3.Connection, at: str | None = None) -> list[
         ]
         if len(solo) >= 4:
             half = len(solo) // 2
-            # Already asking the deepest kind of question (SOLO 4) is not a plateau.
-            if max(solo[half:]) <= max(solo[:half]) < 4:
+            # Still asking the deepest kind of question (SOLO 4) is not a plateau.
+            if max(solo[half:]) < 4 and max(solo[half:]) <= max(solo[:half]):
                 flags.append({"concept_id": cid, "behavior": "flat_question_complexity", "suggests": "plateau"})
     return flags

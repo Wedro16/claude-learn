@@ -176,7 +176,7 @@ def test_session_summary_reports_only_this_sessions_changes(store):
     store.record_intervention(NAME, "retrieval", "What happens when it's down for good?", "correct",
                               response="it gives up after five tries", session_id="s1")
     # Evidence from another session never shows up here.
-    store.record_evidence(NAME, "self_explanation", True, ref="s2")
+    store.record_evidence(NAME, "self_explanation", True, ref="s2", session_id="s2")
 
     summary = store.session_summary("s1")
     assert summary["changes"] == [{"concept": NAME, "from": 0, "to": 1}]
@@ -185,3 +185,24 @@ def test_session_summary_reports_only_this_sessions_changes(store):
     (upcoming,) = summary["upcoming"]
     assert upcoming["track"] == "skill" and upcoming["review_on"]
     assert store.context([NAME])["concepts"][0]["review_on"] == upcoming["review_on"]
+
+
+def test_session_summary_counts_commit_reviews_done_in_the_session(store):
+    # Last session's commit, tagged at the start of this one: its evidence carries the commit SHA.
+    store.record_concept(NAME, context_id="s0")
+    store.record_commit("abc", "s0", ATTR_HUMAN)
+    store.start_session("s1", "/repo")
+    store.record_concept(NAME, context_id="s1")
+    store.tag_commit("abc", [NAME], session_id="s1")
+    summary = store.session_summary("s1")
+    assert summary["changes"] == [{"concept": NAME, "from": 0, "to": 3}]
+    assert summary["observations"] == 1
+
+
+def test_next_plan_ignores_this_requests_just_do_it(store):
+    store.record_concept(NAME, context_id="s0")
+    store.record_concept(NAME, context_id="s1")
+    store.set_session_dial("off", session_id="s1")
+    assert store.context([NAME], session_id="s1")["concepts"][0]["plan"]["interventions"] == []
+    (upcoming,) = store.session_summary("s1")["upcoming"]
+    assert upcoming["next_plan"]  # next time is a new request

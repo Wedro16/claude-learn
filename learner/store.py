@@ -112,6 +112,7 @@ class LearnerStore:
         detail: str | None = None,
         ref: str | None = None,
         at: str | None = None,
+        session_id: str | None = None,
     ) -> dict:
         if signal_type not in mastery.SIGNALS:
             raise ValueError(f"Unknown signal_type {signal_type!r}. Known: {sorted(mastery.SIGNALS)}")
@@ -119,9 +120,10 @@ class LearnerStore:
         source = "repo" if signal_type in mastery.REPO_SIGNALS else "conversation"
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO evidence (concept_id, signal_type, passed, source, ref, detail, at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (cid, signal_type, None if passed is None else int(passed), source, ref, detail, at or now()),
+                "INSERT INTO evidence (concept_id, signal_type, passed, source, ref, detail, at, session_id)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (cid, signal_type, None if passed is None else int(passed), source, ref, detail, at or now(),
+                 session_id or current_session_id()),
             )
             return mastery.apply_evidence(self.conn, cur.lastrowid)
 
@@ -147,7 +149,7 @@ class LearnerStore:
         # Only clear outcomes count as evidence; partial answers and skips are logged only.
         signal = INTERVENTION_SIGNAL.get(kind)
         if signal and outcome in ("correct", "incorrect"):
-            return self.record_evidence(cid, signal, outcome == "correct", ref=session_id)
+            return self.record_evidence(cid, signal, outcome == "correct", ref=session_id, session_id=session_id)
         return {"concept_id": cid, "logged": True}
 
     # -- baselines and withheld items -------------------------------------
@@ -182,7 +184,8 @@ class LearnerStore:
             raise NotFound(f"No withheld item {item_id!r}")
         return dict(row)
 
-    def update_withheld(self, item_id: str, status: str, commit_sha: str | None = None, ref: str | None = None) -> dict:
+    def update_withheld(self, item_id: str, status: str, commit_sha: str | None = None, ref: str | None = None,
+                        session_id: str | None = None) -> dict:
         item = self.get_baseline(item_id)
         if item["status"] in REVIEWED:
             # A gap is reviewed once; repeating it would count the same work twice.
@@ -195,7 +198,7 @@ class LearnerStore:
         if status in REVIEWED and item["concept_id"]:
             return self.record_evidence(
                 item["concept_id"], "gap_completion", status != "handed_back", detail=status,
-                ref=commit_sha or item["commit_sha"] or ref,
+                ref=commit_sha or item["commit_sha"] or ref, session_id=session_id,
             )
         return {"item_id": item_id, "status": status}
 
@@ -244,7 +247,7 @@ class LearnerStore:
                 )
         return {"sha": sha, "totals": t, "withheld_ready_for_review": ready}
 
-    def tag_commit(self, sha: str, concept_names: list[str]) -> list[dict]:
+    def tag_commit(self, sha: str, concept_names: list[str], session_id: str | None = None) -> list[dict]:
         """Attach concepts to a commit and turn its attribution into evidence."""
         commit = self.conn.execute("SELECT * FROM commits WHERE sha = ?", (sha,)).fetchone()
         if commit is None:
@@ -269,12 +272,13 @@ class LearnerStore:
                 results.append({"concept_id": cid, "already_tagged": True})
                 continue
             if total and claude == 0 and modified == 0:
-                res = self.record_evidence(cid, "unassisted_use", True, ref=sha)
+                res = self.record_evidence(cid, "unassisted_use", True, ref=sha, session_id=session_id)
             elif total and modified == 0 and human == 0:
-                res = self.record_evidence(cid, "unchanged_merge", None, ref=sha)
+                res = self.record_evidence(cid, "unchanged_merge", None, ref=sha, session_id=session_id)
             else:
                 share = round((modified + human) / total, 2) if total else 0.0
-                res = self.record_evidence(cid, "draft_ownership", None, detail=str(share), ref=sha)
+                res = self.record_evidence(cid, "draft_ownership", None, detail=str(share), ref=sha,
+                                           session_id=session_id)
             results.append(res)
         with self.conn:
             self.conn.execute("UPDATE commits SET tagged = 1 WHERE sha = ?", (sha,))
@@ -348,10 +352,11 @@ class LearnerStore:
         limit = 1 if dial == "light" else 3
         return {"dial": dial, "interventions": kinds[:limit]}
 
-    def context(self, concept_names: list[str], session_id: str | None = None) -> dict:
+    def context(self, concept_names: list[str], session_id: str | None = None, request_dial: bool = True) -> dict:
+        """Plans for these concepts. request_dial=False ignores this request's "just do it" override."""
         session_id = session_id or current_session_id()
         row = self.conn.execute("SELECT dial_override FROM sessions WHERE id = ?", (session_id,)).fetchone()
-        session_dial = row["dial_override"] if row else None
+        session_dial = row["dial_override"] if row and request_dial else None
         at = now()
         out = {"session_id": session_id, "session_dial": session_dial, "concepts": [], "unknown": []}
         for name in concept_names:
@@ -376,7 +381,8 @@ class LearnerStore:
         rules = [dict(r) for r in self.conn.execute(
             "SELECT c.name AS concept, o.rule_id, o.from_level, o.to_level FROM rule_observations o"
             " JOIN evidence e ON e.id = o.evidence_id JOIN concepts c ON c.id = o.concept_id"
-            " WHERE e.ref = ? AND o.passed = 1 AND o.from_level != o.to_level ORDER BY o.id", (session_id,))]
+            " WHERE (e.ref = ? OR e.session_id = ?) AND o.passed = 1 AND o.from_level != o.to_level ORDER BY o.id",
+            (session_id, session_id))]
         first_last: dict[str, list[int]] = {}
         for r in rules:
             first_last.setdefault(r["concept"], [r["from_level"], r["to_level"]])[1] = r["to_level"]
@@ -384,14 +390,16 @@ class LearnerStore:
             "SELECT c.name FROM occurrences o JOIN concepts c ON c.id = o.concept_id"
             " WHERE o.context_id = ? ORDER BY c.name", (session_id,))]
         upcoming = []
-        for c in self.context(names, session_id=None)["concepts"]:
+        # Next time is a new request: plan from the concept's own settings, not this request's dial.
+        for c in self.context(names, session_id=session_id, request_dial=False)["concepts"]:
             upcoming.append({"concept": c["name"], "level": c["level"], "level_name": c["level_name"],
                              "track": c["track"], "review_on": c["review_on"], "next_plan": c["plan"]["interventions"]})
         return {
             "session_id": session_id,
             "changes": [{"concept": c, "from": a, "to": b} for c, (a, b) in first_last.items() if a != b],
             "rules": rules,
-            "observations": self.conn.execute("SELECT COUNT(*) FROM evidence WHERE ref = ?", (session_id,)).fetchone()[0],
+            "observations": self.conn.execute(
+                "SELECT COUNT(*) FROM evidence WHERE ref = ? OR session_id = ?", (session_id, session_id)).fetchone()[0],
             "upcoming": upcoming,
         }
 

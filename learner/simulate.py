@@ -145,7 +145,7 @@ class Sim:
 
         summary = self.store.summary()
         for sha in summary["commits_to_tag"]:
-            for res in self.store.tag_commit(sha, [CONCEPT]):
+            for res in self.store.tag_commit(sha, [CONCEPT], session_id=sid):
                 kind = self.store.conn.execute(
                     "SELECT signal_type FROM evidence WHERE ref = ? ORDER BY id DESC LIMIT 1", (sha,)).fetchone()[0]
                 self.log(week, "session start", f"Last commit tagged: {kind.replace('_', ' ')}",
@@ -158,8 +158,13 @@ class Sim:
             self.log(week, "ask", "Said \"just do it\"", "set_session_dial(off)")
         self.store.record_concept(CONCEPT, context_id=sid)
         plan = self.store.context([CONCEPT], session_id=sid)["concepts"][0]["plan"]["interventions"]
+        dial_off = self.store.conn.execute("SELECT dial_override FROM sessions WHERE id = ?", (sid,)).fetchone()[0]
+        explain_back = dial_off != "off"
+        if explain_back:
+            plan = plan[:2]  # the explain-back at finish counts toward the three per task (CLAUDE.md)
         self.log(week, "ask", "Asked for a task on the concept",
-                 f"get_learner_context -> plan: {', '.join(plan) or 'none (dial off)'}")
+                 f"get_learner_context -> plan: {', '.join(plan) or 'none (dial off)'}"
+                 + (" + explain-back at finish" if explain_back else ""))
 
         for kind in plan:
             if kind in ("orientation", "worked_example", "decision_explanation", "takeaway"):
@@ -205,8 +210,7 @@ class Sim:
             self.log(week, "make it yours", f"Asked a question (SOLO level {solo})",
                      f"record_evidence(question, SOLO {solo})", res)
 
-        dial_off = self.store.conn.execute("SELECT dial_override FROM sessions WHERE id = ?", (sid,)).fetchone()[0]
-        if dial_off != "off":
+        if explain_back:
             self.answer(week, sid, "retrieval", "Explain it back", "finish")
 
         self.commits += 1

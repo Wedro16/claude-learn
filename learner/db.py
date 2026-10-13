@@ -138,7 +138,11 @@ CREATE TABLE IF NOT EXISTS commit_tags (
 """
 
 # Columns added after the first release, for databases created before them.
-MIGRATIONS = [("sessions", "repo", "TEXT"), ("baselines", "repo", "TEXT"), ("commits", "repo", "TEXT")]
+MIGRATIONS = [
+    ("sessions", "repo", "TEXT"), ("baselines", "repo", "TEXT"), ("commits", "repo", "TEXT"),
+    # The session that recorded a piece of evidence; `ref` may point at a commit instead.
+    ("evidence", "session_id", "TEXT"),
+]
 
 
 def home() -> Path:
