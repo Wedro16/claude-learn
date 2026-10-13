@@ -139,26 +139,56 @@ def visitor(request: Request, response: Response) -> str:
 
 
 _last_sweep = 0.0
+# Requests in flight per visitor. Expiry happens under _sandbox_guard and only deletes a sandbox
+# no other request is using, so nothing is deleted mid-request or after another request recreated it.
+_in_flight: dict[str, int] = defaultdict(int)
+_sandbox_guard = threading.Lock()
+
+
+@app.middleware("http")
+async def hold_sandbox(request: Request, call_next):
+    vid = request.cookies.get(COOKIE, "")
+    if not re.fullmatch(r"[0-9a-f]{32}", vid):
+        return await call_next(request)  # a new visitor has no sandbox yet
+    with _sandbox_guard:
+        _in_flight[vid] += 1
+    try:
+        return await call_next(request)
+    finally:
+        with _sandbox_guard:
+            _in_flight[vid] -= 1
+            if not _in_flight[vid]:
+                del _in_flight[vid]
+
+
+def _expired(marker: Path, now_s: float) -> bool:
+    try:
+        return now_s - marker.stat().st_mtime > RETENTION_SECONDS
+    except FileNotFoundError:
+        return False
 
 
 def expire_sandboxes(vid: str) -> None:
     """Enforce retention: a sandbox lives RETENTION_SECONDS from its creation, however often it's visited.
 
-    The visitor's own sandbox is checked on every request; everyone else's at most hourly.
+    The visitor's own sandbox is checked on every request; everyone else's at most hourly. A sandbox
+    another request is using is left for a later check.
     """
     global _last_sweep
     now_s = time.time()
     created = DATA_DIR / vid / ".created"
-    if created.exists() and now_s - created.stat().st_mtime > RETENTION_SECONDS:
-        shutil.rmtree(DATA_DIR / vid, ignore_errors=True)
-    if not created.exists():
-        created.parent.mkdir(parents=True, exist_ok=True)
-        created.touch()
-    if now_s - _last_sweep > 3600:
-        _last_sweep = now_s
-        for marker in DATA_DIR.glob("*/.created"):
-            if now_s - marker.stat().st_mtime > RETENTION_SECONDS:
-                shutil.rmtree(marker.parent, ignore_errors=True)
+    with _sandbox_guard:
+        # Rechecked under the lock: a concurrent request may already have replaced the sandbox.
+        if _expired(created, now_s) and _in_flight.get(vid, 0) <= 1:
+            shutil.rmtree(created.parent, ignore_errors=True)
+        if not created.exists():
+            created.parent.mkdir(parents=True, exist_ok=True)
+            created.touch()
+        if now_s - _last_sweep > 3600:
+            _last_sweep = now_s
+            for marker in DATA_DIR.glob("*/.created"):
+                if marker.parent.name != vid and not _in_flight.get(marker.parent.name) and _expired(marker, now_s):
+                    shutil.rmtree(marker.parent, ignore_errors=True)
 
 
 _seed_locks: dict[Path, threading.Lock] = defaultdict(threading.Lock)

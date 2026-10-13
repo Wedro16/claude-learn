@@ -493,3 +493,36 @@ def test_finishing_credits_an_issue_caught_since_the_last_submit(client, monkeyp
     assert any(r["rule_id"] for r in done["rules"])
     export = client.get("/api/model/developing/export").json()["tables"]["evidence"]
     assert any(e["signal_type"] == "substantive_fix" and e["ref"] == run["run_id"] for e in export)
+
+
+def test_expiry_never_deletes_a_sandbox_in_use_or_already_replaced(client, monkeypatch):
+    import os
+
+    vid = "b" * 32
+    webapp_app.expire_sandboxes(vid)
+    marker = webapp_app.DATA_DIR / vid / ".created"
+    (marker.parent / "work.db").write_text("new work")
+    old = marker.stat().st_mtime - webapp_app.RETENTION_SECONDS - 60
+    os.utime(marker, (old, old))
+
+    # Another request is using the sandbox: it survives, and is checked again later.
+    monkeypatch.setitem(webapp_app._in_flight, vid, 2)
+    webapp_app.expire_sandboxes(vid)
+    assert (marker.parent / "work.db").exists()
+
+    # The first request expires it and starts fresh; a second that saw the old timestamp
+    # rechecks under the lock and leaves the new sandbox alone.
+    monkeypatch.setitem(webapp_app._in_flight, vid, 1)
+    webapp_app.expire_sandboxes(vid)
+    (marker.parent / "work.db").write_text("newer work")
+    webapp_app.expire_sandboxes(vid)
+    assert (marker.parent / "work.db").read_text() == "newer work"
+
+    # The sweep skips sandboxes in use.
+    other = "c" * 32
+    webapp_app.expire_sandboxes(other)
+    os.utime(webapp_app.DATA_DIR / other / ".created", (old, old))
+    monkeypatch.setitem(webapp_app._in_flight, other, 1)
+    monkeypatch.setattr(webapp_app, "_last_sweep", 0.0)
+    webapp_app.expire_sandboxes(vid)
+    assert (webapp_app.DATA_DIR / other).exists()
