@@ -1,0 +1,16 @@
+#!/usr/bin/env python3
+"""Write the line-attribution note and record the commit in the learner store."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+try:
+    from learner.gitflow import post_commit
+
+    result = post_commit()
+    if result.get("withheld_ready_for_review"):
+        print("claude-learn: withheld items ready for review in your next Claude session")
+except Exception as exc:
+    print(f"claude-learn: commit not recorded ({exc})", file=sys.stderr)
