@@ -1,0 +1,21 @@
+{
+  "orientation": "",
+  "decision_notes": [
+    "Each decision follows the same pattern: what we chose, why, and what it costs. Reviewers judge trade-offs, not just choices.",
+    "I gave 'When to revisit' its own heading instead of burying it in the Redis paragraph. That way a future reader scanning for scaling concerns finds it directly.",
+    "I rejected a bullet list mirroring the notes. Bullets would drop the 'because' reasoning that makes the section worth reading.",
+    "Assumption to check: '~6 upstream calls per city per hour' assumes every city is requested at least every 10 minutes. That holds at 40 req/min, but confirm the 12 cities really dominate traffic."
+  ],
+  "prediction_prompt": "If a reviewer sees only 'TTL: 10 minutes' with no explanation, what question do you predict they'll ask? Which sentence in the draft pre-empts it?",
+  "draft": "## Design decisions\n\n**Why a cache at all.** The forecast API was receiving ~40 requests/min, almost all for the same 12 cities. Caching responses removes nearly all of that redundant upstream traffic.\n\n**TTL: 10 minutes.** Upstream forecasts change only hourly, so a longer TTL would usually be safe. We chose 10 minutes so that users see a new forecast within 10 minutes of an upstream update, not up to an hour later. The cost is about 6 upstream calls per city per hour, which is negligible.\n\n**In-process LRU (256 entries), not Redis.**\n[[GAP gap-1]]\nWe run a single instance, so a shared cache buys us nothing yet. Redis would add another service to deploy, monitor, and keep available. An in-process LRU has no network hop and no new dependency, and 256 entries covers our 12 cities with plenty of headroom.\n[[/GAP]]\n\n**Serve stale on upstream errors.** If the upstream call fails and we hold an expired entry, we return it marked as stale instead of returning an error. A slightly old forecast is more useful than none, and the stale flag lets clients decide how to display it.\n\n**When to revisit.** Past one instance, each instance would hold its own cache. That multiplies upstream calls and lets instances serve inconsistent data. At that point, move to Redis or another shared cache.",
+  "gaps": [
+    {
+      "gap_id": "gap-1",
+      "concept": "writing design rationale",
+      "description": "Write 2-3 sentences justifying an in-process LRU over Redis. Cover why the alternative isn't needed now, what it would cost us, and why 256 entries is enough.",
+      "hint": "A good rationale names the condition that makes the rejected option unnecessary *today*. Look at the notes for the one fact about our deployment that makes a shared cache pointless."
+    }
+  ],
+  "critique_invitation": "",
+  "takeaway": "Design rationale earns its place by stating the alternative you rejected, the reason it doesn't fit now, and the condition under which you'd change your mind."
+}
