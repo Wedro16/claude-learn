@@ -133,7 +133,8 @@ flowchart LR
 Run state is a JSON row per run. Slow Claude calls read it first; each change is then applied under a
 per-run lock to a fresh read, so concurrent requests never overwrite each other. Revealed answers
 have their own table. Every piece of evidence carries the run id, so a run's summary counts only
-its own evidence.
+its own evidence. Sandboxes are deleted 7 days after creation; each request checks its own, and an hourly sweep
+checks the rest.
 
 The server derives the baseline (Claude's complete version) and the scaffold (with
 `TODO(learner)` markers) from one draft, so what was withheld is always recorded.

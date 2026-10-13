@@ -45,9 +45,12 @@ function renderPickers() {
   el("button", {
     class: "pick own", "aria-pressed": String(state.task === "own"),
     onclick: () => {
+      // The form replaces the run on screen; don't drop unfinished work without asking.
+      if (state.run && !state.final?.result && !confirm("Leave this run to start your own task?")) return;
       state.task = "own";
+      if (state.run) clearRun();
       // Your own work builds your own learner model, so "You" is the natural learner.
-      if (state.profile !== "you" && !state.run) { state.profile = "you"; loadModel(); }
+      if (state.profile !== "you") { state.profile = "you"; loadModel(); }
       renderPickers();
       showIdle();
     },
@@ -474,12 +477,13 @@ async function submit() {
 async function finishCheck() {
   const runId = state.run.run_id;
   const text = slot("draft").value;
+  // Lock now, not when the check returns: edits typed while Claude reads would be left out of the file.
+  setFinishing(true);
   const done = withTimer(live() ? "Claude is giving your version a final read…" : "Checking…");
   try {
     const data = await api(`/api/runs/${runId}/finish/check`, { profile: state.profile, text, live: live() });
     if (!current(runId)) return;
     state.final = { text, check: data };
-    setFinishing(true);
     const card = slot("finish-card");
     card.classList.remove("hidden");
     $('[data-step="explain"]', card).classList.add("hidden");
@@ -494,7 +498,10 @@ async function finishCheck() {
     slot("teach-q").replaceChildren(mdInline(data.teach_back_question));
     card.scrollIntoView({ behavior: "smooth", block: "start" });
   } catch (err) {
-    if (current(runId)) alert(err.message);
+    if (current(runId)) {
+      setFinishing(false);
+      alert(err.message);
+    }
   } finally {
     done(current(runId));
   }

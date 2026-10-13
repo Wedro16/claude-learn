@@ -25,8 +25,10 @@ Bundled content, so reviewers need nothing of their own:
   the browser, not the server; up to 20,000 characters). Claude first names the 1-3 concepts the task
   involves, reusing ones already in your model, then does it to your plan. Needs live Claude.
   Personal topics (HR, health, legal) aren't tracked. Material is kept only in your browser's
-  sandbox on the server, for up to 7 days.
-- "Download this learner's data" exports everything recorded about a learner as JSON.
+  sandbox on the server. Each sandbox is deleted 7 days after it was created, however often it's
+  visited (or sooner, on a restart).
+- "Download everything stored for this learner" exports a per-concept summary plus every table in
+  the sandbox (answers, discussions and drafts, baselines, evidence, rule checks) as JSON.
 - "Live Claude" calls Claude Opus 5.5 (about 20-40 s). Unchecked, it replays a recorded live
   response instantly. Over the rate limit, it falls back to recordings automatically.
 - "Talk it through with Claude": explain the reasoning behind an edit, ask why, or push back on

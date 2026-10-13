@@ -453,9 +453,43 @@ def test_own_task_needs_live_claude_and_skips_personal_topics(client, monkeypatc
     assert client.get("/api/model/you").json()["concepts"] == []
 
 
-def test_you_start_empty_and_can_export(client):
+def test_you_start_empty_and_can_export_everything(client):
     assert client.get("/api/model/you").json()["concepts"] == []
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    client.post(f"/api/runs/{run['run_id']}/predict", json={"profile": "developing", "answer": "bounded"})
     res = client.get("/api/model/developing/export")
     assert "attachment" in res.headers["content-disposition"]
-    names = {c["name"] for c in res.json()["concepts"]}
-    assert "retry with exponential backoff" in names
+    data = res.json()
+    assert "retry with exponential backoff" in {c["name"] for c in data["concepts"]}
+    tables = data["tables"]
+    assert any(i["response"] == "bounded" for i in tables["interventions"])
+    assert tables["demo_runs"][0]["payload"]["scaffold"] == run["scaffold"] and tables["baselines"]
+
+
+def test_sandboxes_expire_after_retention_however_often_visited(client):
+    import os
+
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    url = f"/api/runs/{run['run_id']}/reveal"
+    assert client.post(url, json={"profile": "developing", "gap_id": "gap-1"}).status_code == 200
+    (marker,) = webapp_app.DATA_DIR.glob("*/.created")
+    old = marker.stat().st_mtime - webapp_app.RETENTION_SECONDS - 60
+    os.utime(marker, (old, old))
+    # Coming back doesn't extend it: the expired sandbox, and the run in it, are gone.
+    assert client.post(url, json={"profile": "developing", "gap_id": "gap-1"}).status_code == 404
+    assert marker.stat().st_mtime > old + 60
+
+
+def test_finishing_credits_an_issue_caught_since_the_last_submit(client, monkeypatch):
+    _finish_stubs(monkeypatch)
+    monkeypatch.setattr(claude, "review", lambda *a: {
+        "gaps": [{"gap_id": "gap-1", "verdict": "as_expected", "feedback": "ok"}],
+        "other_changes": "Fixed the off-by-one", "caught_issue": True})
+    run = client.post("/api/run", json={"task_id": "retry", "profile": "developing"}).json()
+    filled = run["scaffold"].replace("# TODO(learner) gap-1", "delay = 1  #")
+    url = f"/api/runs/{run['run_id']}/finish"
+    client.post(f"{url}/check", json={"profile": "developing", "text": filled})
+    done = client.post(f"{url}/complete", json={"profile": "developing"}).json()
+    assert any(r["rule_id"] for r in done["rules"])
+    export = client.get("/api/model/developing/export").json()["tables"]["evidence"]
+    assert any(e["signal_type"] == "substantive_fix" and e["ref"] == run["run_id"] for e in export)

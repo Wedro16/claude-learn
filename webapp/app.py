@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -41,6 +42,8 @@ GLOBAL_PER_DAY = int(os.environ.get("DEMO_CALLS_PER_DAY", "800"))
 # Proxies that append to X-Forwarded-For in front of the app (Cloud Run's front end appends 1).
 TRUSTED_PROXY_HOPS = int(os.environ.get("DEMO_TRUSTED_PROXY_HOPS", "0"))
 COOKIE = "claude_learn_visitor"
+# A visitor's sandbox (learners, runs, and any material they brought) is deleted this long after it was created.
+RETENTION_SECONDS = 7 * 86400
 MAX_DISCUSSION_MESSAGES = 8  # learner messages per run
 
 RUNS_SCHEMA = """
@@ -130,8 +133,32 @@ def visitor(request: Request, response: Response) -> str:
     vid = request.cookies.get(COOKIE, "")
     if not re.fullmatch(r"[0-9a-f]{32}", vid):
         vid = uuid.uuid4().hex
-    response.set_cookie(COOKIE, vid, max_age=7 * 86400, httponly=True, samesite="lax")
+    response.set_cookie(COOKIE, vid, max_age=RETENTION_SECONDS, httponly=True, samesite="lax")
+    expire_sandboxes(vid)
     return vid
+
+
+_last_sweep = 0.0
+
+
+def expire_sandboxes(vid: str) -> None:
+    """Enforce retention: a sandbox lives RETENTION_SECONDS from its creation, however often it's visited.
+
+    The visitor's own sandbox is checked on every request; everyone else's at most hourly.
+    """
+    global _last_sweep
+    now_s = time.time()
+    created = DATA_DIR / vid / ".created"
+    if created.exists() and now_s - created.stat().st_mtime > RETENTION_SECONDS:
+        shutil.rmtree(DATA_DIR / vid, ignore_errors=True)
+    if not created.exists():
+        created.parent.mkdir(parents=True, exist_ok=True)
+        created.touch()
+    if now_s - _last_sweep > 3600:
+        _last_sweep = now_s
+        for marker in DATA_DIR.glob("*/.created"):
+            if now_s - marker.stat().st_mtime > RETENTION_SECONDS:
+                shutil.rmtree(marker.parent, ignore_errors=True)
 
 
 _seed_locks: dict[Path, threading.Lock] = defaultdict(threading.Lock)
@@ -293,11 +320,21 @@ def model(profile: str, request: Request, response: Response):
 
 @app.get("/api/model/{profile}/export")
 def export(profile: str, request: Request, response: Response):
-    """Everything recorded about a learner: concepts, levels, evidence and the rules that changed them."""
+    """Everything stored for a learner: a readable summary per concept, plus every table in their sandbox.
+
+    The tables include answers, discussions and drafts (runs), baselines, evidence and rule checks.
+    """
     store = learner(visitor(request, response), profile)
     ids = [r[0] for r in store.conn.execute("SELECT concept_id FROM concept_state ORDER BY concept_id")]
+    tables = {}
+    for (name,) in store.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name"):
+        rows = [dict(r) for r in store.conn.execute(f'SELECT * FROM "{name}"')]
+        if name == "demo_runs":
+            rows = [{**r, "payload": json.loads(r["payload"])} for r in rows]
+        tables[name] = rows
     body = {"profile": profile, "exported_at": now(), "concepts": [store.explain(cid) for cid in ids],
-            "report": report.build(store.conn)}
+            "report": report.build(store.conn), "tables": tables}
     return JSONResponse(body, headers={
         "Content-Disposition": f'attachment; filename="claude-learn-{profile}.json"', **response.headers})
 
@@ -626,7 +663,9 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
     # Gaps filled since the last submit still earn credit: review them before the run closes.
     open_gaps = [g for g in run_state["gaps"] if store.get_baseline(g["item_id"])["status"] not in REVIEWED]
     if any(g["gap_id"] not in drafts.unfilled(text) for g in open_gaps):
-        review_gaps(store, run_id, run_state, text, request, body.live)
+        reviewed, _, _ = review_gaps(store, run_id, run_state, text, request, body.live)
+    else:
+        reviewed = None
 
     with editing_run(store, run_id) as current:
         final = current.setdefault("final", {})
@@ -637,7 +676,7 @@ def finish_complete(run_id: str, body: CompleteRequest, request: Request, respon
         store.record_intervention(task["concepts"][0], "retrieval", question, "skipped", session_id=run_id)
 
     # What you built: who wrote what in the final version.
-    owned, _ = record_ownership(store, run_id, run_state, text)
+    owned, _ = record_ownership(store, run_id, run_state, text, reviewed)
     by_class: dict[str, list[int]] = {}
     for number, line in enumerate(owned["lines"], start=1):
         if line["cls"] != "blank":
