@@ -4,7 +4,9 @@ Claude helps you get the work done **and** learn what it helped you build. It ad
 teaches to what you already know, checks what you've learned, and tracks how you take ownership of
 Claude's drafts.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture diagram and tech stack.
+See [docs/USER_JOURNEY.md](docs/USER_JOURNEY.md) for what using it looks like, from one task to the
+following weeks, and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture diagrams and
+tech stack.
 
 This repository has two parts that share one learner engine (`learner/`):
 

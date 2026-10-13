@@ -2,7 +2,8 @@
 
 This repository has two parts that share one learner engine (`learner/`): the **Claude Code
 pilot**, the real-world integration, and the **hosted web demo**, a no-setup version of the core
-loop for reviewers. The design doc's Technical architecture tab covers the production design on GCP.
+loop for reviewers. The design doc's Technical architecture tab covers the production design on GCP. The
+user's side of the same flow is in [USER_JOURNEY.md](USER_JOURNEY.md).
 
 ## Claude Code pilot
 
