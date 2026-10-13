@@ -85,6 +85,12 @@ a different setting). Both are natural extensions of spaced reviews.
   ask for the same explanation less often, your questions get deeper, and you catch Claude's
   mistakes.
 
+**Seeing it over time.** `python -m learner.simulate` runs four simulated learners through 16
+weeks against the real engine and compares the model's level with each one's hidden true
+knowledge. The model stays within one level in 63 of 64 learner-weeks, but runs ahead of an
+engaged novice early. The design doc's Simulation tab has the chart, a step-by-step trace and
+the findings.
+
 ## Your data
 
 - Ask Claude "why am I at level 2 on retries?" or "what have you recorded about me?" and it shows

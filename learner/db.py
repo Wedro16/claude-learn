@@ -145,8 +145,19 @@ def home() -> Path:
     return Path(os.environ.get("CLAUDE_LEARN_HOME", Path.home() / ".claude-learn"))
 
 
+_clock = None  # set by simulations; None means the real time
+
+
 def now() -> str:
+    if _clock is not None:
+        return _clock()
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def set_clock(clock) -> None:
+    """Make now() return clock() instead of the real time; None restores it. For simulations and tests."""
+    global _clock
+    _clock = clock
 
 
 def parse(ts: str) -> datetime:

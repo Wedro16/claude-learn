@@ -97,6 +97,14 @@ Things you can say to Claude:
 .venv/bin/python -m learner.report --json
 ```
 
+## Simulation
+
+`python -m learner.simulate` runs four simulated learners (engaged, delegator, returner, expert)
+through 16 weeks of tasks against the real learner engine, with a hidden "true knowledge" the model
+never sees. It prints each learner's level by week against their true level; `--json trace.json`
+writes every input, engine call, rule fired and level. `tests/test_simulation.py` checks each
+learner's path. Results and findings are in the design doc's Simulation tab.
+
 ## Attribution notes
 
 Notes travel separately from commits:
