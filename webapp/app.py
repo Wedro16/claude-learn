@@ -190,16 +190,15 @@ def expire_sandboxes(vid: str) -> None:
         if sweep:
             _last_sweep = now_s
     if sweep:
+        # Anything left over from an interrupted delete is already out of use.
+        trash += [p for p in (DATA_DIR / ".expired").glob("*") if p.is_dir()]
         candidates = [m for m in DATA_DIR.glob("*/.created") if m.parent.name != vid and _expired(m, now_s)]
         for marker in candidates:
             with _sandbox_guard:
                 if not _in_flight.get(marker.parent.name) and _expired(marker, now_s):
                     trash.append(_retire(marker.parent))
-        # Anything left over from an interrupted delete is already out of use.
-        trash += [p for p in (DATA_DIR / ".expired").glob("*") if p.is_dir()]
-    for folder in trash:
-        if folder:
-            shutil.rmtree(folder, ignore_errors=True)
+    for folder in {f for f in trash if f}:
+        shutil.rmtree(folder, ignore_errors=True)
 
 
 def _retire(folder: Path) -> Path | None:
