@@ -526,3 +526,23 @@ def test_expiry_never_deletes_a_sandbox_in_use_or_already_replaced(client, monke
     monkeypatch.setattr(webapp_app, "_last_sweep", 0.0)
     webapp_app.expire_sandboxes(vid)
     assert (webapp_app.DATA_DIR / other).exists()
+
+
+def test_expired_sandboxes_are_deleted_outside_the_lock(client, monkeypatch):
+    import os
+
+    for vid in ("d" * 32, "e" * 32):
+        webapp_app.expire_sandboxes(vid)
+        marker = webapp_app.DATA_DIR / vid / ".created"
+        old = marker.stat().st_mtime - webapp_app.RETENTION_SECONDS - 60
+        os.utime(marker, (old, old))
+    held = []
+    real_rmtree = webapp_app.shutil.rmtree
+    monkeypatch.setattr(webapp_app.shutil, "rmtree",
+                        lambda path, **kw: held.append(webapp_app._sandbox_guard.locked()) or real_rmtree(path, **kw))
+    monkeypatch.setattr(webapp_app, "_last_sweep", 0.0)
+    webapp_app.expire_sandboxes("d" * 32)
+    assert held == [False, False]  # its own expired sandbox and the swept one, both deleted unlocked
+    assert not (webapp_app.DATA_DIR / ("e" * 32)).exists()
+    assert (webapp_app.DATA_DIR / ("d" * 32) / ".created").exists()  # a fresh sandbox
+    assert not any((webapp_app.DATA_DIR / ".expired").iterdir())

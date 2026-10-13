@@ -172,23 +172,45 @@ def expire_sandboxes(vid: str) -> None:
     """Enforce retention: a sandbox lives RETENTION_SECONDS from its creation, however often it's visited.
 
     The visitor's own sandbox is checked on every request; everyone else's at most hourly. A sandbox
-    another request is using is left for a later check.
+    another request is using is left for a later check. Only quick checks and renames happen under
+    _sandbox_guard (the request middleware waits on it); scanning and deleting happen outside it.
     """
     global _last_sweep
     now_s = time.time()
+    trash = []
     created = DATA_DIR / vid / ".created"
     with _sandbox_guard:
         # Rechecked under the lock: a concurrent request may already have replaced the sandbox.
         if _expired(created, now_s) and _in_flight.get(vid, 0) <= 1:
-            shutil.rmtree(created.parent, ignore_errors=True)
+            trash.append(_retire(created.parent))
         if not created.exists():
             created.parent.mkdir(parents=True, exist_ok=True)
             created.touch()
-        if now_s - _last_sweep > 3600:
+        sweep = now_s - _last_sweep > 3600
+        if sweep:
             _last_sweep = now_s
-            for marker in DATA_DIR.glob("*/.created"):
-                if marker.parent.name != vid and not _in_flight.get(marker.parent.name) and _expired(marker, now_s):
-                    shutil.rmtree(marker.parent, ignore_errors=True)
+    if sweep:
+        candidates = [m for m in DATA_DIR.glob("*/.created") if m.parent.name != vid and _expired(m, now_s)]
+        for marker in candidates:
+            with _sandbox_guard:
+                if not _in_flight.get(marker.parent.name) and _expired(marker, now_s):
+                    trash.append(_retire(marker.parent))
+        # Anything left over from an interrupted delete is already out of use.
+        trash += [p for p in (DATA_DIR / ".expired").glob("*") if p.is_dir()]
+    for folder in trash:
+        if folder:
+            shutil.rmtree(folder, ignore_errors=True)
+
+
+def _retire(folder: Path) -> Path | None:
+    """Move a sandbox out of use in one rename; the slow delete happens later, outside the lock."""
+    target = DATA_DIR / ".expired" / uuid.uuid4().hex
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        folder.rename(target)
+    except FileNotFoundError:
+        return None
+    return target
 
 
 _seed_locks: dict[Path, threading.Lock] = defaultdict(threading.Lock)
