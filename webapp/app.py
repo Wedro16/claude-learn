@@ -358,7 +358,7 @@ def reveal(run_id: str, body: RevealRequest, request: Request, response: Respons
             "model": snapshot(store)}
 
 
-@app.get("/healthz", include_in_schema=False)
-def healthz():
+@app.get("/health", include_in_schema=False)
+def health():
     return {"ok": True}
 

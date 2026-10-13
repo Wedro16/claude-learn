@@ -28,6 +28,6 @@ gcloud secrets add-iam-policy-binding "$SECRET" "$P" \
   --member="serviceAccount:${NUMBER}-compute@developer.gserviceaccount.com" \
   --role=roles/secretmanager.secretAccessor >/dev/null
 
-gcloud run deploy "$SERVICE" "$P" --source . --region "$REGION" \
+gcloud run deploy "$SERVICE" "$P" --source . --region "$REGION" --quiet \
   --allow-unauthenticated --max-instances 1 --memory 1Gi --timeout 300 \
   --set-secrets "ANTHROPIC_API_KEY=${SECRET}:latest"

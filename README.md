@@ -1,12 +1,45 @@
 # claude-learn
 
-Claude helps you get the work done **and** learn what it helped you build. This repository is the
-pilot: it runs in Claude Code on a Claude subscription, keeps a private learner model on your
-machine, and records how you take ownership of Claude's drafts.
+Claude helps you get the work done **and** learn what it helped you build. It adapts how much it
+teaches to what you already know, checks what you've learned, and tracks how you take ownership of
+Claude's drafts.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the architecture diagram and tech stack.
 
-## Setup
+This repository has two parts that share one learner engine (`learner/`):
+
+- **Web demo (`webapp/`)**: a hosted, no-setup demo of the core loop. Pick a learner and a task;
+  Claude does the task adapted to that learner, asks a question, leaves a gap; the learner
+  model updates as you answer. Runs on Cloud Run.
+- **Claude Code pilot**: the real-world integration, used day to day in your own repository
+  (MCP server, hooks, commit attribution). Setup below.
+
+## Web demo
+
+Bundled content, so reviewers need nothing of their own:
+
+- Three synthetic learners: Sam (new to the topic), Priya (building the skill), Alex (experienced).
+- Two tasks: make a flaky API call resilient (code) and explain a design decision to a reviewer (writing).
+- "Live Claude" calls Claude Opus 5.5 (about 20-40 s). Unchecked, it replays a recorded live
+  response instantly. Over the rate limit, it falls back to recordings automatically.
+- API docs at `/docs`.
+
+Run locally:
+
+```sh
+pip install -r requirements.txt
+ANTHROPIC_API_KEY=... uvicorn webapp.app:app --reload     # http://localhost:8000
+```
+
+Re-record the instant-replay responses after changing prompts: `ANTHROPIC_API_KEY=... python -m webapp.record`.
+
+Deploy to Cloud Run (stores the key in Secret Manager):
+
+```sh
+ANTHROPIC_API_KEY=... scripts/deploy.sh <gcp-project-id> [region]
+```
+
+## Claude Code pilot setup
 
 Requires Python 3.10+ and Claude Code signed in with a Claude subscription.
 
