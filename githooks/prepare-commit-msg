@@ -9,6 +9,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 try:
     from learner.gitflow import prepare_commit_msg
 
-    prepare_commit_msg(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)
+    prepare_commit_msg(*sys.argv[1:4])
 except Exception as exc:  # provenance must never stop someone committing
     print(f"claude-learn: attribution skipped ({exc})", file=sys.stderr)

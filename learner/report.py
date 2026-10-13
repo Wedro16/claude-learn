@@ -42,7 +42,7 @@ def build(conn, at: str | None = None) -> dict:
         "as_of": at,
         "criteria": {
             "A_unassisted": {
-                "unassisted_use_evidence": _count(conn, "SELECT COUNT(*) FROM evidence WHERE signal_type = 'unassisted_use'"),
+                "unassisted_use_evidence": _count(conn, "SELECT COUNT(*) FROM evidence WHERE signal_type = 'unassisted_use' AND passed = 1"),
                 "commits": len(commits),
                 "commits_without_claude_lines": unassisted,
             },
@@ -50,7 +50,7 @@ def build(conn, at: str | None = None) -> dict:
             "C_harder_questions": {"solo_avg_prior_30d": solo_avg(d60, d30), "solo_avg_last_30d": solo_avg(d30, at)},
             "D_critical_engagement": {
                 "critiques": _count(conn, "SELECT COUNT(*) FROM evidence WHERE signal_type = 'critique' AND passed = 1"),
-                "substantive_fixes": _count(conn, "SELECT COUNT(*) FROM evidence WHERE signal_type = 'substantive_fix'"),
+                "substantive_fixes": _count(conn, "SELECT COUNT(*) FROM evidence WHERE signal_type = 'substantive_fix' AND passed = 1"),
             },
         },
         "rule_predictions": {

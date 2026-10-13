@@ -10,7 +10,7 @@ flowchart LR
 
     subgraph cc["Claude Code (Claude subscription)"]
         claude["Claude<br/><i>follows CLAUDE.md learning policy</i>"]
-        hooks["Claude Code hooks<br/><i>Python 3.13</i><br/>SessionStart · PostToolUse · SessionEnd"]
+        hooks["Claude Code hooks<br/><i>Python 3.13</i><br/>SessionStart · UserPromptSubmit · PostToolUse · SessionEnd"]
     end
 
     subgraph local["Local machine"]
@@ -41,7 +41,7 @@ flowchart LR
 | Learning policy | `CLAUDE.md` | Claude Code loads it into every session in this repo |
 | Learner model API | MCP server, Python 3.13, `mcp` SDK 2.x, stdio transport | Claude calls it as tools; no network service to run |
 | Storage | SQLite (stdlib `sqlite3`) | Zero setup; one file per learner, outside the repo |
-| Session context | Claude Code hooks (`SessionStart`, `PostToolUse`, `SessionEnd`) | Load learner context and record Claude-written lines without Claude having to remember |
+| Session context | Claude Code hooks (`SessionStart`, `UserPromptSubmit`, `PostToolUse`, `SessionEnd`) | Load learner context and record Claude-written lines without Claude having to remember |
 | Provenance | git `prepare-commit-msg` and `post-commit` hooks, git notes | Trailers and line ranges travel with the repository |
 | Repository host | GitHub (existing) | Easy to reproduce |
 | Reporting | `python -m learner.report` | Exit-criteria metrics without a frontend |
@@ -56,9 +56,10 @@ flowchart LR
 3. When Claude withholds part of the work, it stores the full draft with `record_baseline` and
    leaves `TODO(learner) <item_id>` markers.
 4. **PostToolUse hook** records every line Claude writes.
-5. On commit, **prepare-commit-msg** classifies each added line as `claude`, `claude_modified` or
-   `human`, and adds `Assisted-by` / `Claude-Session` trailers when Claude lines are present.
-   **post-commit** writes the attribution note and records the commit.
+5. On commit, **prepare-commit-msg** adds `Assisted-by` / `Claude-Session` trailers when the commit
+   contains lines Claude wrote in this repository in the last 7 days. **post-commit** classifies each
+   added line of the finished commit as `claude`, `claude_modified` or `human` (amends included),
+   writes the attribution note, and records the commit. Merge commits are skipped.
 6. In the next session, Claude tags the commit's concepts and reviews completed gaps against the
    baseline. Those become evidence, and the mastery rules update levels.
 

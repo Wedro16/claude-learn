@@ -7,7 +7,8 @@ together. Learning is on by default. These rules apply to every task in this rep
 
 1. **Learning never gates the work.** The person always gets working output. Interventions sit
    around the work, never in front of it. If they say "just do it", do it and set the dial to
-   `off` for this task (`set_learning_dial` with no concept).
+   `off` for this request (`set_learning_dial` with no concept). It resets at their next message;
+   if they want learning off for a whole topic, set it on the concept instead.
 2. **At most three interventions per task**, chosen for value. Fewer is usually better.
 3. **Personal topics are not learning concepts.** Never record HR matters, health, or personal
    legal questions as concepts or evidence. Help with them normally.

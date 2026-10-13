@@ -18,7 +18,9 @@ FUZZY_THRESHOLD = 0.85
 SENSITIVE_PATTERNS = [
     r"\b(parental|maternity|paternity|sick|medical|bereavement) leave\b",
     r"\bperformance (review|improvement plan)\b",
-    r"\bpip\b",
+    # "PIP" only in its HR sense; plain "pip" is the Python package installer.
+    r"\b(on|placed on|put on) an? pip\b",
+    r"\bpip (meeting|process|plan|goals)\b",
     r"\b(salary|compensation|pay) (negotiation|raise|review)\b",
     r"\b(termination|layoff|severance|disciplinary)\b",
     r"\b(harassment|discrimination|grievance)\b",

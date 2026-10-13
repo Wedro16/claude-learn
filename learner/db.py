@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS occurrences (
 CREATE TABLE IF NOT EXISTS sessions (
     id           TEXT PRIMARY KEY,
     cwd          TEXT,
+    repo         TEXT,
     started_at   TEXT NOT NULL,
     ended_at     TEXT,
     task_summary TEXT,
@@ -93,6 +94,7 @@ CREATE TABLE IF NOT EXISTS interventions (
 CREATE TABLE IF NOT EXISTS baselines (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     session_id TEXT,
+    repo       TEXT,
     path       TEXT NOT NULL,
     content    TEXT NOT NULL,
     created_at TEXT NOT NULL
@@ -120,6 +122,7 @@ CREATE TABLE IF NOT EXISTS claude_lines (
 CREATE TABLE IF NOT EXISTS commits (
     sha            TEXT PRIMARY KEY,
     session_id     TEXT,
+    repo           TEXT,
     claude_lines   INTEGER NOT NULL,
     modified_lines INTEGER NOT NULL,
     human_lines    INTEGER NOT NULL,
@@ -127,7 +130,15 @@ CREATE TABLE IF NOT EXISTS commits (
     tagged         INTEGER NOT NULL DEFAULT 0,
     at             TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS commit_tags (
+    sha        TEXT NOT NULL,
+    concept_id TEXT NOT NULL,
+    PRIMARY KEY (sha, concept_id)
+);
 """
+
+# Columns added after the first release, for databases created before them.
+MIGRATIONS = [("sessions", "repo", "TEXT"), ("baselines", "repo", "TEXT"), ("commits", "repo", "TEXT")]
 
 
 def home() -> Path:
@@ -142,12 +153,30 @@ def parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts)
 
 
+def _private(path: Path, mode: int) -> None:
+    """Restrict a learner file or directory to its owner. It holds answers, drafts and source lines."""
+    try:
+        os.chmod(path, mode)
+    except OSError:
+        pass
+
+
 def connect(path: Path | str | None = None) -> sqlite3.Connection:
     if path is None:
-        home().mkdir(parents=True, exist_ok=True)
+        home().mkdir(mode=0o700, parents=True, exist_ok=True)
+        _private(home(), 0o700)
         path = home() / "learner.db"
+    path = Path(path)
+    # Create the file owner-only before SQLite opens it, and fix older, wider files.
+    path.touch(mode=0o600, exist_ok=True)
+    _private(path, 0o600)
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(SCHEMA)
+    for table, column, kind in MIGRATIONS:
+        columns = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
+    conn.commit()
     return conn

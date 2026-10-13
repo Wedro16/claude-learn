@@ -58,7 +58,8 @@ def get_learner_context(concepts: list[str]) -> dict:
 @tool
 def get_learner_summary() -> dict:
     """Skill tracks, due reviews, commits to tag, withheld items to review, and non-learning flags."""
-    return store().summary()
+    s = store()
+    return s.summary(repo=s.session_repo(current_session_id()))
 
 
 @tool
@@ -98,7 +99,7 @@ def record_evidence(
 def record_intervention(
     concept: str,
     kind: Literal[
-        "orientation", "worked_example", "gap", "takeaway", "prediction",
+        "orientation", "worked_example", "gap", "takeaway", "decision_explanation", "prediction",
         "retrieval", "self_explanation", "what_if", "critique",
     ],
     prompt: str,
@@ -150,7 +151,9 @@ def set_learning_dial(
     mode: Literal["about", "how_to"] | None = None,
     concept: str | None = None,
 ) -> dict:
-    """Set the dial for a topic (with concept) or for this task only (without concept).
+    """Set the dial for a topic (with concept), or for the current request only (without concept).
+
+    A request-only setting is cleared when the person sends their next message.
 
     mode: "about" to understand a concept, "how_to" to be able to do it. Topic-level only.
     """

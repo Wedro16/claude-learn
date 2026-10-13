@@ -18,7 +18,10 @@ INTERVENTION_SIGNAL = {
     "what_if": "what_if",
     "critique": "critique",
 }
-INTERVENTION_KINDS = {"orientation", "worked_example", "gap", "takeaway", *INTERVENTION_SIGNAL}
+INTERVENTION_KINDS = {
+    "orientation", "worked_example", "gap", "takeaway", "decision_explanation", *INTERVENTION_SIGNAL,
+}
+REVIEWED = ("as_expected", "different", "handed_back")
 
 
 class NotFound(ValueError):
@@ -34,7 +37,7 @@ def current_session_id() -> str | None:
 
 
 def set_current_session(session_id: str, cwd: str | None) -> None:
-    home().mkdir(parents=True, exist_ok=True)
+    home().mkdir(mode=0o700, parents=True, exist_ok=True)
     (home() / "current_session.json").write_text(json.dumps({"id": session_id, "cwd": cwd, "at": now()}))
 
 
@@ -44,13 +47,17 @@ class LearnerStore:
 
     # -- sessions ----------------------------------------------------------
 
-    def start_session(self, session_id: str, cwd: str | None = None) -> None:
+    def start_session(self, session_id: str, cwd: str | None = None, repo: str | None = None) -> None:
         with self.conn:
             self.conn.execute(
-                "INSERT OR IGNORE INTO sessions (id, cwd, started_at) VALUES (?, ?, ?)",
-                (session_id, cwd, now()),
+                "INSERT OR IGNORE INTO sessions (id, cwd, repo, started_at) VALUES (?, ?, ?, ?)",
+                (session_id, cwd, repo, now()),
             )
             mastery.apply_decay(self.conn)
+
+    def session_repo(self, session_id: str | None) -> str | None:
+        row = self.conn.execute("SELECT repo FROM sessions WHERE id = ?", (session_id,)).fetchone()
+        return row["repo"] if row else None
 
     def end_session(self, session_id: str, task_summary: str | None = None) -> None:
         with self.conn:
@@ -76,7 +83,8 @@ class LearnerStore:
         relations: list[dict] | None = None,
         context_id: str | None = None,
     ) -> dict:
-        if concepts.is_sensitive(name, description, *(aliases or [])):
+        related = [rel["concept"] for rel in relations or []]
+        if concepts.is_sensitive(name, description, *(aliases or []), *related):
             return {"rejected": "sensitive", "message": "Personal topics are not tracked as learning concepts."}
         with self.conn:
             cid, created = concepts.resolve(self.conn, name, description, domain, aliases)
@@ -148,8 +156,8 @@ class LearnerStore:
         session_id = session_id or current_session_id()
         with self.conn:
             cur = self.conn.execute(
-                "INSERT INTO baselines (session_id, path, content, created_at) VALUES (?, ?, ?, ?)",
-                (session_id, path, content, now()),
+                "INSERT INTO baselines (session_id, repo, path, content, created_at) VALUES (?, ?, ?, ?, ?)",
+                (session_id, self.session_repo(session_id), path, content, now()),
             )
             baseline_id = cur.lastrowid
             items = []
@@ -176,12 +184,15 @@ class LearnerStore:
 
     def update_withheld(self, item_id: str, status: str, commit_sha: str | None = None) -> dict:
         item = self.get_baseline(item_id)
+        if item["status"] in REVIEWED:
+            # A gap is reviewed once; repeating it would count the same work twice.
+            return {"item_id": item_id, "status": item["status"], "already_reviewed": True}
         with self.conn:
             self.conn.execute(
                 "UPDATE withheld SET status = ?, commit_sha = COALESCE(?, commit_sha), updated_at = ? WHERE item_id = ?",
                 (status, commit_sha, now(), item_id),
             )
-        if status in ("as_expected", "different", "handed_back") and item["concept_id"]:
+        if status in REVIEWED and item["concept_id"]:
             return self.record_evidence(
                 item["concept_id"], "gap_completion", status != "handed_back", detail=status,
                 ref=commit_sha or item["commit_sha"],
@@ -190,17 +201,38 @@ class LearnerStore:
 
     # -- commits -----------------------------------------------------------
 
-    def record_commit(self, sha: str, session_id: str | None, attribution: dict) -> dict:
+    def record_commit(
+        self,
+        sha: str,
+        session_id: str | None,
+        attribution: dict,
+        repo: str | None = None,
+        replaces: str | None = None,
+    ) -> dict:
         t = attribution["totals"]
-        files = list(attribution["files"])
+        # Every touched file, including ones with no significant added lines (a removed TODO marker).
+        files = attribution.get("touched") or list(attribution["files"])
         with self.conn:
+            tagged = 0
+            if replaces:
+                # An amend replaces the earlier commit; carry its tags over instead of counting both.
+                old = self.conn.execute("SELECT tagged FROM commits WHERE sha = ?", (replaces,)).fetchone()
+                tagged = old["tagged"] if old else 0
+                self.conn.execute("DELETE FROM commits WHERE sha = ?", (replaces,))
+                self.conn.execute("UPDATE commit_tags SET sha = ? WHERE sha = ?", (sha, replaces))
+                self.conn.execute("UPDATE withheld SET commit_sha = ? WHERE commit_sha = ?", (sha, replaces))
             self.conn.execute(
-                "INSERT OR REPLACE INTO commits (sha, session_id, claude_lines, modified_lines, human_lines, files, at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (sha, session_id, t["claude"], t["claude_modified"], t["human"], json.dumps(files), now()),
+                "INSERT OR REPLACE INTO commits"
+                " (sha, session_id, repo, claude_lines, modified_lines, human_lines, files, tagged, at)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (sha, session_id, repo, t["claude"], t["claude_modified"], t["human"], json.dumps(files), tagged, now()),
             )
             # Withheld items in touched files are now ready for Claude to review.
-            pending = self.conn.execute("SELECT item_id, location FROM withheld WHERE status = 'pending'").fetchall()
+            pending = self.conn.execute(
+                "SELECT w.item_id, w.location FROM withheld w JOIN baselines b ON b.id = w.baseline_id"
+                " WHERE w.status = 'pending' AND (? IS NULL OR b.repo IS NULL OR b.repo = ?)",
+                (repo, repo),
+            ).fetchall()
             ready = [
                 p["item_id"] for p in pending
                 if any(f.endswith(p["location"]) or p["location"].endswith(f) for f in files)
@@ -219,13 +251,23 @@ class LearnerStore:
             raise NotFound(f"No recorded commit {sha!r}")
         claude, modified, human = commit["claude_lines"], commit["modified_lines"], commit["human_lines"]
         total = claude + modified + human
+        # Claude-assisted work already counted an occurrence for its session; reuse it.
+        context = commit["session_id"] or sha
         results = []
         for name in concept_names:
-            rec = self.record_concept(name, context_id=sha)
+            rec = self.record_concept(name, context_id=context)
             if "rejected" in rec:
                 results.append({"concept": name, **rec})
                 continue
             cid = rec["concept_id"]
+            with self.conn:
+                fresh = self.conn.execute(
+                    "INSERT OR IGNORE INTO commit_tags (sha, concept_id) VALUES (?, ?)", (sha, cid)
+                ).rowcount
+            if not fresh:
+                # Each commit/concept pair counts once.
+                results.append({"concept_id": cid, "already_tagged": True})
+                continue
             if total and claude == 0 and modified == 0:
                 res = self.record_evidence(cid, "unassisted_use", True, ref=sha)
             elif total and modified == 0 and human == 0:
@@ -250,10 +292,15 @@ class LearnerStore:
         return self._state(cid)
 
     def set_session_dial(self, dial: str, session_id: str | None = None) -> dict:
+        """Override the dial for the current request. Cleared when the person sends their next message."""
         session_id = session_id or current_session_id()
         with self.conn:
             self.conn.execute("UPDATE sessions SET dial_override = ? WHERE id = ?", (dial, session_id))
-        return {"session_id": session_id, "dial_override": dial}
+        return {"session_id": session_id, "dial_override": dial, "until": "the person's next message"}
+
+    def clear_session_dial(self, session_id: str) -> None:
+        with self.conn:
+            self.conn.execute("UPDATE sessions SET dial_override = NULL WHERE id = ?", (session_id,))
 
     def set_track(self, concept: str, track: str) -> dict:
         cid = self._concept_id(concept)
@@ -313,8 +360,11 @@ class LearnerStore:
             out["concepts"].append(state)
         return out
 
-    def summary(self) -> dict:
-        """What Claude needs at the start of a session."""
+    def summary(self, repo: str | None = None) -> dict:
+        """What Claude needs at the start of a session.
+
+        Concept history is shared across repositories; commits and gaps are limited to ``repo``.
+        """
         at = now()
         states = [
             self._state(r["concept_id"])
@@ -327,11 +377,15 @@ class LearnerStore:
             ],
             "reviews_due": [s["name"] for s in states if self._review_due(s, at)],
             "commits_to_tag": [
-                r["sha"] for r in self.conn.execute("SELECT sha FROM commits WHERE tagged = 0 ORDER BY at")
+                r["sha"] for r in self.conn.execute(
+                    "SELECT sha FROM commits WHERE tagged = 0 AND (? IS NULL OR repo = ?) ORDER BY at", (repo, repo)
+                )
             ],
             "withheld_to_review": [
                 dict(r) for r in self.conn.execute(
-                    "SELECT item_id, description, location, commit_sha FROM withheld WHERE status = 'committed'"
+                    "SELECT w.item_id, w.description, w.location, w.commit_sha FROM withheld w"
+                    " JOIN baselines b ON b.id = w.baseline_id"
+                    " WHERE w.status = 'committed' AND (? IS NULL OR b.repo = ?)", (repo, repo),
                 )
             ],
             "non_learning_flags": mastery.non_learning_flags(self.conn, at),
