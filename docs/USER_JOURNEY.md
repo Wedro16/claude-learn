@@ -3,7 +3,8 @@
 A person asks Claude for work, gets working output every time, and owns more of it each time a
 topic comes back. This page follows one person through a single task, the next session, and the
 following weeks, first in Claude Code (real use) and then in the hosted demo. The design doc's
-Design brief tab has the same journey with a diagram.
+[User journey tab](https://claude.ai/code/artifact/5472a59b-895f-4bab-b99c-82b8cd220207) has the same
+journey with charts.
 
 ```mermaid
 flowchart LR
