@@ -165,6 +165,33 @@ def test_reset_rejects_paths_outside_the_sandbox(client, tmp_path):
     assert victim.read_text() == "keep me"
 
 
+def test_hitting_the_live_limit_tells_the_page_when_live_calls_return(client, monkeypatch):
+    monkeypatch.setattr(webapp_app, "PER_VISITOR_PER_HOUR", 1)
+    first = client.post("/api/run", json={"task_id": "retry", "profile": "developing"})
+    assert first.json()["source"] == "live" and "X-Live-Limit" not in first.headers
+    second = client.post("/api/run", json={"task_id": "retry", "profile": "developing"})
+    assert second.json()["source"] == "recorded"
+    assert second.headers["X-Live-Limit"] == "visitor"
+    assert 3590 <= int(second.headers["X-Live-Limit-Retry-After"]) <= 3600
+    recorded = client.post("/api/run", json={"task_id": "retry", "profile": "developing", "live": False})
+    assert "X-Live-Limit" not in recorded.headers  # choosing instant replay isn't hitting the limit
+
+
+def test_the_daily_cap_reports_the_longer_wait(monkeypatch):
+    monkeypatch.setattr(webapp_app, "GLOBAL_PER_DAY", 1)
+    limiter = webapp_app.Limiter()
+    assert limiter.allow("a") and not limiter.allow("b")
+    scope, wait = limiter.retry_after("b")
+    assert scope == "day" and 86390 <= wait <= 86400
+
+
+def test_a_cap_of_zero_reports_a_full_window(monkeypatch):
+    monkeypatch.setattr(webapp_app, "PER_VISITOR_PER_HOUR", 0)
+    limiter = webapp_app.Limiter()
+    assert not limiter.allow("a")
+    assert limiter.retry_after("a") == ("visitor", 3600)
+
+
 def test_rate_limit_key_ignores_caller_supplied_forwarding(monkeypatch):
     from starlette.requests import Request
 

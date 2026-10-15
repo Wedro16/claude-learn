@@ -9,6 +9,7 @@ Run locally:  uvicorn webapp.app:app --reload
 
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -100,6 +101,20 @@ class Limiter:
             self.day_calls.append(now)
             return True
 
+    def retry_after(self, key: str) -> tuple[str, int]:
+        """Which cap refused the caller ("visitor" or "day") and the seconds until a live call is allowed again."""
+        now = time.time()
+        with self.lock:
+            calls = self.visitor_calls[key]
+            waits = []
+            # With no calls on record (a cap of 0), assume a full window.
+            if len(calls) >= PER_VISITOR_PER_HOUR:
+                waits.append(("visitor", (calls[0] if calls else now) + 3600 - now))
+            if len(self.day_calls) >= GLOBAL_PER_DAY:
+                waits.append(("day", (self.day_calls[0] if self.day_calls else now) + 86400 - now))
+        scope, wait = max(waits, key=lambda w: w[1], default=("visitor", 0))
+        return scope, max(0, math.ceil(wait))
+
 
 limiter = Limiter()
 
@@ -121,7 +136,9 @@ def live(request: Request, want_live: bool, fn, *args):
     """Call Claude if allowed; raise Unavailable so callers use the offline path otherwise."""
     if not want_live:
         raise claude.Unavailable("recorded mode selected")
-    if not limiter.allow(client_address(request)):
+    address = client_address(request)
+    if not limiter.allow(address):
+        request.state.live_limit = limiter.retry_after(address)  # reported to the page by report_live_limit
         raise claude.Unavailable("live-call limit reached for now")
     return fn(*args)
 
@@ -143,6 +160,17 @@ _last_sweep = 0.0
 # no other request is using, so nothing is deleted mid-request or after another request recreated it.
 _in_flight: dict[str, int] = defaultdict(int)
 _sandbox_guard = threading.Lock()
+
+
+@app.middleware("http")
+async def report_live_limit(request: Request, call_next):
+    """Tell the page when a live call fell back because of the rate limit, so it can say so."""
+    response = await call_next(request)
+    limit = getattr(request.state, "live_limit", None)
+    if limit:
+        response.headers["X-Live-Limit"] = limit[0]
+        response.headers["X-Live-Limit-Retry-After"] = str(limit[1])
+    return response
 
 
 @app.middleware("http")

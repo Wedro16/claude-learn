@@ -64,6 +64,12 @@ code, pre, textarea.draft { font-family: var(--mono); font-size: 13px; }
 .controls a { color: var(--accent); }
 .toggle { display: flex; gap: 6px; align-items: center; cursor: pointer; }
 
+.limit-notice {
+  display: flex; gap: 12px; align-items: baseline; justify-content: space-between;
+  padding: 10px 24px; background: var(--warn-soft); color: var(--ink); border-bottom: 1px solid var(--warn);
+}
+.limit-notice.hidden { display: none; }
+
 .howto { padding: 12px 24px; border-bottom: 1px solid var(--line); }
 .howto ol { margin: 4px 0; padding-left: 20px; }
 .howto p { margin: 4px 0 0; }

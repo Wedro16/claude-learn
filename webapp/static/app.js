@@ -20,12 +20,31 @@ async function api(path, body) {
   const res = await fetch(path, body === undefined ? {} : {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+  const limit = res.headers.get("X-Live-Limit");
+  if (limit) showLimitNotice(limit, Number(res.headers.get("X-Live-Limit-Retry-After")) || 0);
   if (!res.ok) {
     const detail = await res.json().catch(() => ({}));
     throw new Error(detail.detail || `Request failed (${res.status})`);
   }
   return res.json();
 }
+
+// Live Claude is rate-limited; when a call falls back, say why and when live calls come back.
+let limitTimer;
+function showLimitNotice(scope, seconds) {
+  const back = new Date(Date.now() + seconds * 1000).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const wait = seconds < 90 ? "about a minute" : seconds < 5400 ? `about ${Math.round(seconds / 60)} minutes`
+    : `about ${Math.round(seconds / 3600)} hours`;
+  $("#limit-text").textContent = (scope === "day"
+    ? "This demo has reached its daily limit of live Claude calls across all visitors."
+    : "You've reached this demo's hourly limit of live Claude calls.")
+    + ` Until about ${back} (${wait}), Claude's replies are recorded or offline, and reviews only credit exact matches.`
+    + " You can keep exploring in the meantime.";
+  $("#limit-notice").classList.remove("hidden");
+  clearTimeout(limitTimer);
+  limitTimer = setTimeout(hideLimitNotice, seconds * 1000);
+}
+function hideLimitNotice() { $("#limit-notice").classList.add("hidden"); }
 
 function live() { return $("#live").checked; }
 function profileName(id) { return state.catalog.profiles.find((p) => p.id === id).name; }
@@ -653,4 +672,5 @@ async function reset() {
   $("#own-load").addEventListener("click", loadGitHub);
   $("#own-url").addEventListener("keydown", (e) => { if (e.key === "Enter") loadGitHub(); });
   $("#reset").addEventListener("click", reset);
+  $("#limit-dismiss").addEventListener("click", hideLimitNotice);
 })();
